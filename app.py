@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.4.0"
+    version="1.4.1"
 )
 
 
@@ -44,16 +44,13 @@ POT_URL = os.getenv(
     "http://127.0.0.1:4416"
 )
 
-# Render Secret File.
-#
-# IMPORTANT:
-# /etc/secrets is read-only.
-# Therefore we copy the cookies to /tmp before
-# giving them to yt-dlp.
+# Render Secret File
+# This file is READ-ONLY.
 COOKIE_SOURCE = Path(
     "/etc/secrets/cookies.txt"
 )
 
+# Writable copy used by yt-dlp.
 COOKIE_FILE = Path(
     "/tmp/yt-dlp-cookies.txt"
 )
@@ -77,7 +74,7 @@ class DownloadRequest(BaseModel):
 
 
 # ============================================================
-# YOUTUBE URL VALIDATION
+# YOUTUBE URL HELPERS
 # ============================================================
 
 def validate_youtube_url(url: str) -> str:
@@ -91,8 +88,8 @@ def validate_youtube_url(url: str) -> str:
         "https"
     }:
         raise HTTPException(
-            400,
-            "Only public YouTube URLs are supported"
+            status_code=400,
+            detail="Only public YouTube URLs are supported"
         )
 
     if p.netloc.lower() not in {
@@ -102,8 +99,8 @@ def validate_youtube_url(url: str) -> str:
         "youtu.be",
     }:
         raise HTTPException(
-            400,
-            "Only public YouTube URLs are supported"
+            status_code=400,
+            detail="Only public YouTube URLs are supported"
         )
 
     return url
@@ -117,8 +114,8 @@ def shorts_channel_url(url: str) -> str:
 
     if not path:
         raise HTTPException(
-            400,
-            "Enter a valid YouTube channel URL"
+            status_code=400,
+            detail="Enter a valid YouTube channel URL"
         )
 
     if path.lower().endswith("/shorts"):
@@ -154,7 +151,7 @@ def is_channel_url(url: str) -> bool:
 
 
 # ============================================================
-# COOKIE PREPARATION
+# COOKIE HANDLING
 # ============================================================
 
 def prepare_cookie_file() -> Path:
@@ -162,15 +159,14 @@ def prepare_cookie_file() -> Path:
     if not COOKIE_SOURCE.exists():
 
         raise HTTPException(
-            500,
-            "YouTube cookies.txt was not found in "
-            "Render Secret Files"
+            status_code=500,
+            detail=(
+                "YouTube cookies.txt was not found "
+                "in Render Secret Files"
+            )
         )
 
     try:
-
-        # Render Secret Files are read-only.
-        # Make a writable copy for yt-dlp.
 
         shutil.copyfile(
             COOKIE_SOURCE,
@@ -182,8 +178,8 @@ def prepare_cookie_file() -> Path:
     except Exception as e:
 
         raise HTTPException(
-            500,
-            f"Could not prepare YouTube cookies: {e}"
+            status_code=500,
+            detail=f"Could not prepare YouTube cookies: {e}"
         )
 
 
@@ -204,7 +200,7 @@ def run_ytdlp(
         "--no-warnings",
         "--no-progress",
 
-        # Use writable copy of Render Secret.
+        # Writable cookie copy.
         "--cookies",
         str(cookie_file),
 
@@ -231,20 +227,20 @@ def run_ytdlp(
     except FileNotFoundError:
 
         raise HTTPException(
-            500,
-            "yt-dlp is not installed on the backend"
+            status_code=500,
+            detail="yt-dlp is not installed on the backend"
         )
 
     except subprocess.TimeoutExpired:
 
         raise HTTPException(
-            504,
-            "YouTube request timed out"
+            status_code=504,
+            detail="YouTube request timed out"
         )
 
 
 # ============================================================
-# DISCOVER SHORTS
+# DISCOVERY
 # ============================================================
 
 def discover_with_client(
@@ -254,7 +250,6 @@ def discover_with_client(
 
     r = run_ytdlp(
         [
-
             "--flat-playlist",
 
             "--lazy-playlist",
@@ -271,12 +266,10 @@ def discover_with_client(
 
             url,
         ],
-
         timeout=240
     )
 
     found = []
-
     seen = set()
 
     for line in r.stdout.splitlines():
@@ -302,17 +295,15 @@ def discover_with_client(
 
         seen.add(video_id)
 
-        title = (
-            parts[1].strip()
-            if len(parts) > 1
-            else ""
-        )
+        title = ""
 
-        webpage_url = (
-            parts[2].strip()
-            if len(parts) > 2
-            else ""
-        )
+        if len(parts) > 1:
+            title = parts[1].strip()
+
+        webpage_url = ""
+
+        if len(parts) > 2:
+            webpage_url = parts[2].strip()
 
         if not webpage_url:
 
@@ -364,7 +355,7 @@ def health():
 
 
 # ============================================================
-# DISCOVER ENDPOINT
+# DISCOVER SHORTS
 # ============================================================
 
 @app.post("/discover")
@@ -381,18 +372,16 @@ def discover(
     ):
 
         raise HTTPException(
-            400,
-            "Enter a public YouTube channel URL"
+            status_code=400,
+            detail="Enter a public YouTube channel URL"
         )
 
-    # Always discover from the Shorts tab.
     shorts_url = shorts_channel_url(
         original_url
     )
 
     errors = []
 
-    # Discovery clients.
     clients = (
         "android_vr",
         "tv",
@@ -423,8 +412,7 @@ def discover(
             if stderr:
 
                 errors.append(
-                    f"{client}: "
-                    f"{stderr[-1200:]}"
+                    f"{client}: {stderr[-1200:]}"
                 )
 
         except HTTPException:
@@ -439,17 +427,21 @@ def discover(
 
     error_text = " | ".join(
         errors
-    )[-5000:]
+    )
+
+    error_text = error_text[-5000:]
 
     raise HTTPException(
-        502,
-        "YouTube Shorts discovery failed. "
-        + error_text
+        status_code=502,
+        detail=(
+            "YouTube Shorts discovery failed. "
+            + error_text
+        )
     )
 
 
 # ============================================================
-# DOWNLOAD ENDPOINT
+# DOWNLOAD ONE SHORT
 # ============================================================
 
 @app.post("/download")
@@ -461,9 +453,6 @@ def download(
         "https://www.youtube.com/shorts/"
         + req.video_id
     )
-
-    # Create a unique temporary directory
-    # for this particular download.
 
     tempdir = Path(
         tempfile.mkdtemp(
@@ -478,30 +467,23 @@ def download(
 
     try:
 
-        # Try several YouTube clients.
-
         attempts = [
-
             (
                 "mweb",
                 "bv*+ba/b"
             ),
-
             (
                 "web_safari",
                 "bv*+ba/b"
             ),
-
             (
                 "android_vr",
                 "bv*+ba/b"
             ),
-
             (
                 "tv",
                 "bv*+ba/b"
             ),
-
             (
                 "web_embedded",
                 "bv*+ba/b"
@@ -512,8 +494,7 @@ def download(
 
         for client, fmt in attempts:
 
-            # Clean output from previous attempt.
-
+            # Remove files from previous attempt.
             for old_file in tempdir.iterdir():
 
                 if old_file.is_file():
@@ -525,7 +506,6 @@ def download(
 
             r = run_ytdlp(
                 [
-
                     "--no-playlist",
 
                     "--extractor-args",
@@ -554,6 +534,65 @@ def download(
 
                     video_url,
                 ],
-
                 timeout=900
+            )
+
+            files = [
+                p
+                for p in tempdir.iterdir()
+                if p.is_file()
+            ]
+
+            if (
+                r.returncode == 0
+                and files
+            ):
+
+                src = max(
+                    files,
+                    key=lambda p: p.stat().st_size
+                )
+
+                safe_name = re.sub(
+                    r"[^A-Za-z0-9._-]+",
+                    "_",
+                    src.name
+                )
+
+                final = (
+                    DOWNLOAD_ROOT
+                    / safe_name
+                )
+
+                shutil.copy2(
+                    src,
+                    final
+                )
+
+                return FileResponse(
+                    path=final,
+                    media_type="video/mp4",
+                    filename=final.name
+                )
+
+            last_error = (
+                r.stderr
+                or r.stdout
+                or "download failed"
+            )[-4000:]
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "YouTube download failed after all "
+                "download methods were attempted:\n"
+                + last_error
+            )
+        )
+
+    finally:
+
+        shutil.rmtree(
+            tempdir,
+            ignore_errors=True
         )
