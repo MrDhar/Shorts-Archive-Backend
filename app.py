@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.5.0"
+    version="1.6.0"
 )
 
 
@@ -50,7 +50,7 @@ COOKIE_SOURCE = Path(
     "/etc/secrets/cookies.txt"
 )
 
-# yt-dlp receives a writable copy.
+# Writable copy used by yt-dlp.
 COOKIE_FILE = Path(
     "/tmp/yt-dlp-cookies.txt"
 )
@@ -203,15 +203,13 @@ def run_ytdlp(
         "--no-warnings",
         "--no-progress",
 
-        # Use writable copy of cookies.
         "--cookies",
         str(cookie_file),
 
-        # PO-token provider.
         "--extractor-args",
         (
             "youtubepot-bgutilhttp:"
-            f"base_url={POT_URL};"
+            f"base_url={POT_URL}"
         ),
     ]
 
@@ -253,9 +251,7 @@ def discover_with_client(
     result = run_ytdlp(
         [
             "--flat-playlist",
-
             "--lazy-playlist",
-
             "--ignore-errors",
 
             "--extractor-args",
@@ -272,7 +268,6 @@ def discover_with_client(
     )
 
     found = []
-
     seen = set()
 
     for line in result.stdout.splitlines():
@@ -330,6 +325,52 @@ def discover_with_client(
 
 
 # ============================================================
+# SAVE DOWNLOAD
+# ============================================================
+
+def save_download(
+    source_file: Path
+):
+
+    extension = source_file.suffix.lower()
+
+    media_types = {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mkv": "video/x-matroska",
+        ".mov": "video/quicktime",
+        ".m4v": "video/mp4",
+    }
+
+    media_type = media_types.get(
+        extension,
+        "application/octet-stream"
+    )
+
+    safe_name = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        source_file.name
+    )
+
+    final_file = (
+        DOWNLOAD_ROOT
+        / safe_name
+    )
+
+    shutil.copy2(
+        source_file,
+        final_file
+    )
+
+    return FileResponse(
+        path=final_file,
+        media_type=media_type,
+        filename=final_file.name
+    )
+
+
+# ============================================================
 # ROOT
 # ============================================================
 
@@ -379,7 +420,6 @@ def discover(
             detail="Enter a public YouTube channel URL"
         )
 
-    # Always use the channel's Shorts tab.
     shorts_url = shorts_channel_url(
         original_url
     )
@@ -431,13 +471,13 @@ def discover(
 
     error_text = " | ".join(
         errors
-    )
+    )[-5000:]
 
     raise HTTPException(
         status_code=502,
         detail=(
             "YouTube Shorts discovery failed. "
-            + error_text[-5000:]
+            + error_text
         )
     )
 
@@ -471,7 +511,6 @@ def download(
 
         clients = [
             "mweb",
-            "web_safari",
             "android_vr",
             "tv",
             "web_embedded",
@@ -481,7 +520,56 @@ def download(
 
         for client in clients:
 
-            # Clean files from previous attempt.
+            # =================================================
+            # DIAGNOSTIC:
+            # Ask yt-dlp what formats it can actually see.
+            # =================================================
+
+            format_result = run_ytdlp(
+                [
+                    "--no-playlist",
+
+                    "--extractor-args",
+                    f"youtube:player_client={client}",
+
+                    "--list-formats",
+
+                    video_url,
+                ],
+                timeout=180
+            )
+
+            format_output = (
+                format_result.stdout
+                or ""
+            )
+
+            format_error = (
+                format_result.stderr
+                or ""
+            )
+
+            # If yt-dlp cannot see formats with this client,
+            # move to the next client.
+
+            if (
+                format_result.returncode != 0
+                or "Available formats" not in format_output
+            ):
+
+                last_error = (
+                    f"Client: {client}\n"
+                    f"FORMAT ERROR:\n"
+                    f"{format_error or format_output}"
+                )[-5000:]
+
+                continue
+
+            # =================================================
+            # FORMATS EXIST.
+            # Now attempt the download.
+            # =================================================
+
             for old_file in tempdir.iterdir():
 
                 if old_file.is_file():
@@ -491,12 +579,7 @@ def download(
                     except Exception:
                         pass
 
-            # ------------------------------------------------
-            # ATTEMPT 1
-            # Let yt-dlp choose the best available format.
-            # ------------------------------------------------
-
-            result = run_ytdlp(
+            download_result = run_ytdlp(
                 [
                     "--no-playlist",
 
@@ -515,76 +598,13 @@ def download(
                     "--retry-sleep",
                     "1",
 
+                    # Do not force format 18.
+                    # Use the best format available.
                     "-f",
                     "best",
 
-                    "-o",
-                    output_template,
-
-                    video_url,
-                ],
-                timeout=900
-            )
-
-            files = [
-                file
-                for file in tempdir.iterdir()
-                if file.is_file()
-            ]
-
-            if (
-                result.returncode == 0
-                and files
-            ):
-
-                source_file = max(
-                    files,
-                    key=lambda file:
-                    file.stat().st_size
-                )
-
-                return save_download(
-                    source_file
-                )
-
-            last_error = (
-                result.stderr
-                or result.stdout
-                or "download failed"
-            )[-4000:]
-
-            # ------------------------------------------------
-            # ATTEMPT 2
-            # No forced format at all.
-            # ------------------------------------------------
-
-            for old_file in tempdir.iterdir():
-
-                if old_file.is_file():
-
-                    try:
-                        old_file.unlink()
-                    except Exception:
-                        pass
-
-            result = run_ytdlp(
-                [
-                    "--no-playlist",
-
-                    "--extractor-args",
-                    f"youtube:player_client={client}",
-
-                    "--retries",
-                    "3",
-
-                    "--fragment-retries",
-                    "3",
-
-                    "--file-access-retries",
-                    "3",
-
-                    "--retry-sleep",
-                    "1",
+                    "--merge-output-format",
+                    "mp4",
 
                     "-o",
                     output_template,
@@ -601,7 +621,7 @@ def download(
             ]
 
             if (
-                result.returncode == 0
+                download_result.returncode == 0
                 and files
             ):
 
@@ -616,16 +636,24 @@ def download(
                 )
 
             last_error = (
-                result.stderr
-                or result.stdout
-                or "download failed"
-            )[-4000:]
+                f"Client: {client}\n"
+                f"DOWNLOAD ERROR:\n"
+                + (
+                    download_result.stderr
+                    or download_result.stdout
+                    or "Download failed"
+                )
+            )[-5000:]
+
+        # =====================================================
+        # ALL CLIENTS FAILED
+        # Return useful diagnostic information.
+        # =====================================================
 
         raise HTTPException(
             status_code=502,
             detail=(
-                "YouTube download failed after all "
-                "download methods were attempted:\n"
+                "YouTube download failed.\n\n"
                 + last_error
             )
         )
@@ -635,50 +663,4 @@ def download(
         shutil.rmtree(
             tempdir,
             ignore_errors=True
-        )
-
-
-# ============================================================
-# SAVE DOWNLOADED FILE
-# ============================================================
-
-def save_download(
-    source_file: Path
-):
-
-    extension = source_file.suffix.lower()
-
-    media_types = {
-        ".mp4": "video/mp4",
-        ".webm": "video/webm",
-        ".mkv": "video/x-matroska",
-        ".mov": "video/quicktime",
-        ".m4v": "video/mp4",
-    }
-
-    media_type = media_types.get(
-        extension,
-        "application/octet-stream"
-    )
-
-    safe_name = re.sub(
-        r"[^A-Za-z0-9._-]+",
-        "_",
-        source_file.name
-    )
-
-    final_file = (
-        DOWNLOAD_ROOT
-        / safe_name
-    )
-
-    shutil.copy2(
-        source_file,
-        final_file
-    )
-
-    return FileResponse(
-        path=final_file,
-        media_type=media_type,
-        filename=final_file.name
-                )
+            )
