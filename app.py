@@ -31,7 +31,7 @@ logger = logging.getLogger("shorts-archive")
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.9.0",
+    version="1.9.1",
 )
 
 
@@ -108,8 +108,8 @@ GOOGLE_USERINFO_URL = (
 )
 
 
-# Temporary OAuth state storage.
-# For a single-instance Render deployment this is sufficient.
+# OAuth state storage.
+# Suitable for a single Render instance.
 oauth_states = set()
 
 
@@ -605,111 +605,179 @@ def simple_page(
 ) -> HTMLResponse:
 
     html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport"
-              content="width=device-width,initial-scale=1">
-        <title>{title}</title>
-        <style>
-            body {{
-                margin: 0;
-                padding: 40px 20px;
-                background: #0b0b0f;
-                color: #f5f5f5;
-                font-family: Arial, sans-serif;
-                line-height: 1.7;
-            }}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
 
-            main {{
-                max-width: 760px;
-                margin: auto;
-            }}
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
 
-            h1 {{
-                font-size: 32px;
-            }}
+    <title>{title}</title>
 
-            h2 {{
-                margin-top: 32px;
-            }}
+    <style>
+        * {{
+            box-sizing: border-box;
+        }}
 
-            a {{
-                color: #8ab4f8;
-            }}
-        </style>
-    </head>
+        body {{
+            margin: 0;
+            padding: 40px 20px;
+            background: #0b0b0f;
+            color: #f5f5f5;
+            font-family:
+                Arial,
+                Helvetica,
+                sans-serif;
+            line-height: 1.7;
+        }}
 
-    <body>
-        <main>
-            {content}
-        </main>
-    </body>
-    </html>
-    """
+        main {{
+            width: 100%;
+            max-width: 760px;
+            margin: 0 auto;
+        }}
 
-    return HTMLResponse(content=html)
+        h1 {{
+            font-size: 32px;
+            margin-bottom: 24px;
+        }}
+
+        h2 {{
+            font-size: 21px;
+            margin-top: 32px;
+        }}
+
+        p {{
+            color: #d0d0d5;
+        }}
+
+        a {{
+            color: #8ab4f8;
+            text-decoration: none;
+        }}
+
+        a:hover {{
+            text-decoration: underline;
+        }}
+
+        .card {{
+            background: #15151a;
+            border: 1px solid #292930;
+            border-radius: 14px;
+            padding: 24px;
+        }}
+
+        .button {{
+            display: inline-block;
+            margin-top: 10px;
+            padding: 12px 18px;
+            border-radius: 9px;
+            background: #ffffff;
+            color: #111111;
+            font-weight: 600;
+            text-decoration: none;
+        }}
+
+        .button:hover {{
+            text-decoration: none;
+            opacity: 0.9;
+        }}
+
+        .links {{
+            margin-top: 30px;
+        }}
+    </style>
+</head>
+
+<body>
+    <main>
+        {content}
+    </main>
+</body>
+</html>
+"""
+
+    return HTMLResponse(
+        content=html
+    )
 
 
 # ============================================================
 # PRIVACY POLICY
 # ============================================================
 
-@app.get("/privacy", response_class=HTMLResponse)
+@app.get(
+    "/privacy",
+    response_class=HTMLResponse,
+)
 def privacy():
 
     return simple_page(
         "Privacy Policy - Shorts Auto Uploader",
         """
-        <h1>Privacy Policy</h1>
+<div class="card">
 
-        <p>
-            Shorts Auto Uploader is an application that helps users
-            manage and upload YouTube Shorts.
-        </p>
+<h1>Privacy Policy</h1>
 
-        <h2>YouTube Account Access</h2>
+<p>
+Shorts Auto Uploader is an application that helps
+users manage and upload YouTube Shorts.
+</p>
 
-        <p>
-            If you choose to connect your YouTube account,
-            the application uses Google's OAuth authorization
-            system to request the permissions required for
-            YouTube functionality.
-        </p>
+<h2>YouTube Account Access</h2>
 
-        <h2>Information We Access</h2>
+<p>
+If you choose to connect your YouTube account,
+the application uses Google's OAuth authorization
+system to request the permissions required for
+YouTube functionality.
+</p>
 
-        <p>
-            Depending on the features you use, the application
-            may receive basic YouTube account information and
-            permissions necessary to upload videos to your
-            YouTube channel.
-        </p>
+<h2>Information We Access</h2>
 
-        <h2>Data Storage</h2>
+<p>
+Depending on the features you use, the application
+may receive basic YouTube account information and
+the permissions necessary to upload videos to your
+YouTube channel.
+</p>
 
-        <p>
-            We do not sell your personal information.
-            OAuth credentials are used only to provide the
-            requested YouTube functionality.
-        </p>
+<h2>Data Storage</h2>
 
-        <h2>Third Parties</h2>
+<p>
+We do not sell your personal information.
+OAuth credentials are used only to provide the
+requested YouTube functionality.
+</p>
 
-        <p>
-            YouTube and Google APIs are operated by Google and
-            are subject to Google's own privacy policies and
-            terms.
-        </p>
+<h2>Third Parties</h2>
 
-        <h2>Contact</h2>
+<p>
+YouTube and Google APIs are operated by Google and
+are subject to Google's own privacy policies and
+terms.
+</p>
 
-        <p>
-            For privacy questions, contact the developer through
-            the email address associated with this application.
-        </p>
-        """,
+<h2>Contact</h2>
+
+<p>
+For privacy questions, contact the developer through
+the email address associated with this application.
+</p>
+
+<div class="links">
+<a href="/">Home</a>
+&nbsp; · &nbsp;
+<a href="/terms">Terms of Service</a>
+&nbsp; · &nbsp;
+<a href="/youtube/account">YouTube Account</a>
+</div>
+
+</div>
+""",
     )
 
 
@@ -717,50 +785,66 @@ def privacy():
 # TERMS
 # ============================================================
 
-@app.get("/terms", response_class=HTMLResponse)
+@app.get(
+    "/terms",
+    response_class=HTMLResponse,
+)
 def terms():
 
     return simple_page(
         "Terms of Service - Shorts Auto Uploader",
         """
-        <h1>Terms of Service</h1>
+<div class="card">
 
-        <p>
-            By using Shorts Auto Uploader, you agree to use the
-            application only for lawful purposes and in accordance
-            with YouTube's applicable terms and policies.
-        </p>
+<h1>Terms of Service</h1>
 
-        <h2>YouTube Content</h2>
+<p>
+By using Shorts Auto Uploader, you agree to use
+the application only for lawful purposes and in
+accordance with YouTube's applicable terms and
+policies.
+</p>
 
-        <p>
-            You are responsible for having the necessary rights
-            and permissions for any content that you upload or
-            process through the application.
-        </p>
+<h2>YouTube Content</h2>
 
-        <h2>Account Authorization</h2>
+<p>
+You are responsible for having the necessary rights
+and permissions for any content that you upload or
+process through the application.
+</p>
 
-        <p>
-            You may disconnect your Google or YouTube account
-            at any time through your Google account permissions.
-        </p>
+<h2>Account Authorization</h2>
 
-        <h2>Availability</h2>
+<p>
+You may disconnect your Google or YouTube account
+at any time through your Google account permissions.
+</p>
 
-        <p>
-            We do not guarantee that the application or YouTube
-            services will always be available.
-        </p>
+<h2>Availability</h2>
 
-        <h2>Contact</h2>
+<p>
+We do not guarantee that the application or YouTube
+services will always be available.
+</p>
 
-        <p>
-            For questions regarding these terms, contact the
-            developer through the email address associated with
-            the application.
-        </p>
-        """,
+<h2>Contact</h2>
+
+<p>
+For questions regarding these terms, contact the
+developer through the email address associated with
+this application.
+</p>
+
+<div class="links">
+<a href="/">Home</a>
+&nbsp; · &nbsp;
+<a href="/privacy">Privacy Policy</a>
+&nbsp; · &nbsp;
+<a href="/youtube/account">YouTube Account</a>
+</div>
+
+</div>
+""",
     )
 
 
@@ -774,6 +858,80 @@ def oauth_configured() -> bool:
         GOOGLE_CLIENT_ID
         and GOOGLE_CLIENT_SECRET
         and GOOGLE_REDIRECT_URI
+    )
+
+
+# ============================================================
+# YOUTUBE ACCOUNT PAGE
+# ============================================================
+
+@app.get(
+    "/youtube/account",
+    response_class=HTMLResponse,
+)
+def youtube_account():
+
+    status_text = (
+        "OAuth configuration is ready."
+        if oauth_configured()
+        else
+        "OAuth configuration is not complete."
+    )
+
+    if oauth_configured():
+
+        connect_section = """
+<a class="button" href="/oauth/start">
+    Connect YouTube Account
+</a>
+"""
+
+    else:
+
+        connect_section = """
+<p>
+The server administrator needs to configure
+Google OAuth in Render before YouTube
+authorization can be started.
+</p>
+"""
+
+    return simple_page(
+        "YouTube Account - Shorts Auto Uploader",
+        f"""
+<div class="card">
+
+<h1>YouTube Account</h1>
+
+<p>
+Connect your YouTube account to enable
+YouTube upload functionality.
+</p>
+
+<p>
+<strong>{status_text}</strong>
+</p>
+
+{connect_section}
+
+<div class="links">
+
+<a href="/">Home</a>
+&nbsp; · &nbsp;
+
+<a href="/privacy">
+    Privacy Policy
+</a>
+&nbsp; · &nbsp;
+
+<a href="/terms">
+    Terms of Service
+</a>
+
+</div>
+
+</div>
+""",
     )
 
 
@@ -826,7 +984,10 @@ def oauth_start():
 # OAUTH CALLBACK
 # ============================================================
 
-@app.get("/oauth/callback", response_class=HTMLResponse)
+@app.get(
+    "/oauth/callback",
+    response_class=HTMLResponse,
+)
 async def oauth_callback(
     request: Request,
 ):
@@ -855,15 +1016,26 @@ async def oauth_callback(
         return simple_page(
             "YouTube Authorization",
             f"""
-            <h1>Authorization cancelled</h1>
-            <p>Google returned:</p>
-            <p>{error}</p>
-            <p>
-                <a href="/youtube/account">
-                    Return to YouTube
-                </a>
-            </p>
-            """,
+<div class="card">
+
+<h1>Authorization cancelled</h1>
+
+<p>
+Google returned:
+</p>
+
+<p>
+<strong>{error}</strong>
+</p>
+
+<p>
+<a class="button" href="/youtube/account">
+    Return to YouTube
+</a>
+</p>
+
+</div>
+""",
         )
 
     if not code:
@@ -886,81 +1058,10 @@ async def oauth_callback(
 
         import requests
 
-        response = requests.post(
+        token_response = requests.post(
             GOOGLE_TOKEN_URL,
             data={
                 "code": code,
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code",
-            },
-            timeout=30,
-        )
-
-        if response.status_code != 200:
-
-            logger.error(
-                "Google token exchange failed: %s",
-                response.text,
-            )
-
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Google authorization failed: "
-                    + response.text[:2000]
-                ),
-            )
-
-        token_data = response.json()
-
-        access_token = token_data.get(
-            "access_token"
-        )
-
-        if not access_token:
-
-            raise HTTPException(
-                status_code=502,
-                detail="Google did not return an access token.",
-            )
-
-        user_response = requests.get(
-            GOOGLE_USERINFO_URL,
-            headers={
-                "Authorization":
-                    f"Bearer {access_token}"
-            },
-            timeout=30,
-        )
-
-        user_data = {}
-
-        if user_response.status_code == 200:
-
-            user_data = user_response.json()
-
-        email = user_data.get(
-            "email",
-            "your Google account",
-        )
-
-        return simple_page(
-            "YouTube Authorization Successful",
-            f"""
-            <h1>✓ YouTube connected</h1>
-
-            <p>
-                Your Google account
-                <strong>{email}</strong>
-                has been successfully authorized.
-            </p>
-
-            <p>
-                Shorts Auto Uploader can now request the
-                YouTube permissions you approved.
-            </p>
-
-            <p>
-                You can clo
+                "redire
