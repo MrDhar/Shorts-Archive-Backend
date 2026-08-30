@@ -594,48 +594,62 @@ def download(
                     except Exception:
                         pass
 
-            # Use better format selection with fallbacks.
-            # Prioritize mp4 since it's most compatible,
-            # then fall back to webm, then any best format.
-            format_string = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best"
+            # Use client-specific format strings.
+            # Different clients support different formats, so try progressively simpler options.
+            format_attempts = [
+                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+                "bestvideo+bestaudio/best",
+                "best",
+            ]
 
-            download_result = run_ytdlp(
-                [
-                    "--no-playlist",
+            download_result = None
 
-                    "--extractor-args",
-                    f"youtube:player_client={client}",
+            for format_string in format_attempts:
 
-                    "--retries",
-                    "3",
+                logger.info(
+                    f"Attempting {req.video_id} with {client} format: {format_string}"
+                )
 
-                    "--fragment-retries",
-                    "3",
+                download_result = run_ytdlp(
+                    [
+                        "--no-playlist",
 
-                    "--file-access-retries",
-                    "3",
+                        "--extractor-args",
+                        f"youtube:player_client={client}",
 
-                    "--retry-sleep",
-                    "1",
+                        "--retries",
+                        "3",
 
-                    # Better format selection with fallbacks:
-                    # 1. Best video (mp4) + best audio (m4a) 
-                    # 2. Best mp4 single file
-                    # 3. Best video + audio (any format)
-                    # 4. Best overall
-                    "-f",
-                    format_string,
+                        "--fragment-retries",
+                        "3",
 
-                    "--merge-output-format",
-                    "mp4",
+                        "--file-access-retries",
+                        "3",
 
-                    "-o",
-                    output_template,
+                        "--retry-sleep",
+                        "1",
 
-                    video_url,
-                ],
-                timeout=900
-            )
+                        "-f",
+                        format_string,
+
+                        "--merge-output-format",
+                        "mp4",
+
+                        "-o",
+                        output_template,
+
+                        video_url,
+                    ],
+                    timeout=900
+                )
+
+                if download_result.returncode == 0:
+                    logger.info(f"✓ Format {format_string} succeeded")
+                    break
+                else:
+                    logger.warning(
+                        f"✗ Format {format_string} failed"
+                    )
 
             files = [
                 file
@@ -701,4 +715,4 @@ def download(
         shutil.rmtree(
             tempdir,
             ignore_errors=True
-                )
+    )
