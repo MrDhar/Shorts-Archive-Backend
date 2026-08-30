@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.8.0",
+    version="1.7.0",
 )
 
 
@@ -62,13 +62,10 @@ POT_URL = os.getenv(
     "http://127.0.0.1:4416",
 )
 
-# Render Secret File.
-# This file is read-only.
 COOKIE_SOURCE = Path(
     "/etc/secrets/cookies.txt"
 )
 
-# Writable copy for yt-dlp.
 COOKIE_FILE = Path(
     "/tmp/yt-dlp-cookies.txt"
 )
@@ -92,21 +89,29 @@ class DownloadRequest(BaseModel):
 
 
 # ============================================================
-# YOUTUBE URL HELPERS
+# YOUTUBE URL VALIDATION
 # ============================================================
 
 def validate_youtube_url(url: str) -> str:
+
     url = url.strip()
 
     parsed = urlparse(url)
 
-    if parsed.scheme not in {"http", "https"}:
+    if parsed.scheme not in {
+        "http",
+        "https",
+    }:
         raise HTTPException(
             status_code=400,
             detail="Only public YouTube URLs are supported",
         )
 
-    if parsed.netloc.lower() not in {
+    hostname = (
+        parsed.hostname or ""
+    ).lower()
+
+    if hostname not in {
         "youtube.com",
         "www.youtube.com",
         "m.youtube.com",
@@ -121,11 +126,13 @@ def validate_youtube_url(url: str) -> str:
 
 
 def shorts_channel_url(url: str) -> str:
+
     parsed = urlparse(url)
 
     path = parsed.path.rstrip("/")
 
     if not path:
+
         raise HTTPException(
             status_code=400,
             detail="Enter a valid YouTube channel URL",
@@ -149,7 +156,13 @@ def shorts_channel_url(url: str) -> str:
 
 
 def is_channel_url(url: str) -> bool:
-    path = urlparse(url).path.rstrip("/").lower()
+
+    path = (
+        urlparse(url)
+        .path
+        .rstrip("/")
+        .lower()
+    )
 
     return (
         path.endswith("/shorts")
@@ -161,11 +174,13 @@ def is_channel_url(url: str) -> bool:
 
 
 # ============================================================
-# COOKIE HANDLING
+# COOKIES
 # ============================================================
 
 def prepare_cookie_file() -> Path:
+
     if not COOKIE_SOURCE.exists():
+
         raise HTTPException(
             status_code=500,
             detail=(
@@ -174,35 +189,16 @@ def prepare_cookie_file() -> Path:
             ),
         )
 
-    if not COOKIE_SOURCE.is_file():
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "YouTube cookies Secret File exists "
-                "but is not a regular file"
-            ),
-        )
-
     try:
+
         shutil.copyfile(
             COOKIE_SOURCE,
             COOKIE_FILE,
         )
 
-        try:
-            os.chmod(
-                COOKIE_FILE,
-                0o600,
-            )
-        except Exception:
-            pass
-
         return COOKIE_FILE
 
     except Exception as exc:
-        logger.exception(
-            "Could not prepare cookies"
-        )
 
         raise HTTPException(
             status_code=500,
@@ -221,6 +217,7 @@ def run_ytdlp(
     args: list[str],
     timeout: int = 180,
 ):
+
     cookie_file = prepare_cookie_file()
 
     command = [
@@ -241,7 +238,13 @@ def run_ytdlp(
 
     command.extend(args)
 
+    logger.info(
+        "Running yt-dlp: %s",
+        " ".join(command),
+    )
+
     try:
+
         return subprocess.run(
             command,
             capture_output=True,
@@ -250,6 +253,7 @@ def run_ytdlp(
         )
 
     except FileNotFoundError:
+
         raise HTTPException(
             status_code=500,
             detail=(
@@ -259,6 +263,7 @@ def run_ytdlp(
         )
 
     except subprocess.TimeoutExpired:
+
         raise HTTPException(
             status_code=504,
             detail="YouTube request timed out",
@@ -273,10 +278,13 @@ def discover_with_client(
     url: str,
     client: str,
 ):
+
     result = run_ytdlp(
         [
             "--flat-playlist",
+
             "--lazy-playlist",
+
             "--ignore-errors",
 
             "--extractor-args",
@@ -296,7 +304,11 @@ def discover_with_client(
     seen = set()
 
     for line in result.stdout.splitlines():
-        parts = line.split("\t", 2)
+
+        parts = line.split(
+            "\t",
+            2,
+        )
 
         if not parts:
             continue
@@ -325,6 +337,7 @@ def discover_with_client(
             webpage_url = parts[2].strip()
 
         if not webpage_url:
+
             webpage_url = (
                 "https://www.youtube.com/shorts/"
                 + video_id
@@ -351,6 +364,7 @@ def discover_with_client(
 def save_download(
     source_file: Path,
 ):
+
     extension = source_file.suffix.lower()
 
     media_types = {
@@ -382,12 +396,6 @@ def save_download(
         final_file,
     )
 
-    logger.info(
-        "Saved %s (%d bytes)",
-        final_file.name,
-        final_file.stat().st_size,
-    )
-
     return FileResponse(
         path=final_file,
         media_type=media_type,
@@ -396,39 +404,54 @@ def save_download(
 
 
 # ============================================================
-# FORMAT DISCOVERY
+# GET AVAILABLE FORMATS
+#
+# IMPORTANT:
+# This is only used for diagnostics.
+# It does NOT download the video.
 # ============================================================
 
 def get_available_formats(
     video_url: str,
     client: str,
 ):
+
+    logger.info(
+        "[%s] Checking available formats for %s",
+        client,
+        video_url,
+    )
+
     result = run_ytdlp(
         [
             "--no-playlist",
 
-            "--extractor-args",
-            f"youtube:player_client={client}",
+            "--skip-download",
 
             "--list-formats",
+
+            "--extractor-args",
+            f"youtube:player_client={client}",
 
             video_url,
         ],
         timeout=180,
     )
 
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
+    stdout = (
+        result.stdout
+        or ""
+    )
 
-    combined = (
-        stdout
-        + "\n"
-        + stderr
-    ).strip()
+    stderr = (
+        result.stderr
+        or ""
+    )
 
     return (
         result.returncode,
-        combined,
+        stdout,
+        stderr,
     )
 
 
@@ -438,13 +461,13 @@ def get_available_formats(
 
 @app.get("/")
 def root():
+
     return {
         "ok": True,
         "service": "Shorts Archive Backend",
         "status": "running",
-        "version": "1.8.0",
+        "version": "1.7.0",
         "cookies_configured": COOKIE_SOURCE.exists(),
-        "pot_provider": POT_URL,
     }
 
 
@@ -454,385 +477,40 @@ def root():
 
 @app.get("/health")
 def health():
+
     return {
         "ok": True,
         "cookies_configured": COOKIE_SOURCE.exists(),
-        "pot_provider": POT_URL,
     }
 
 
 # ============================================================
-# DISCOVER SHORTS
+# DISCOVER ALL SHORTS
 # ============================================================
 
 @app.post("/discover")
 def discover(
     req: DiscoverRequest,
 ):
+
     original_url = validate_youtube_url(
         req.channel_url
     )
 
-    if not is_channel_url(original_url):
+    if not is_channel_url(
+        original_url
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="Enter a public YouTube channel URL",
+            detail=(
+                "Enter a public YouTube "
+                "channel URL"
+            ),
         )
 
     shorts_url = shorts_channel_url(
         original_url
     )
 
-    errors = []
-
-    clients = [
-        "mweb",
-        "android_vr",
-    ]
-
-    for client in clients:
-        try:
-            logger.info(
-                "Discovering Shorts with %s",
-                client,
-            )
-
-            entries, stderr = (
-                discover_with_client(
-                    shorts_url,
-                    client,
-                )
-            )
-
-            if entries:
-                logger.info(
-                    "Found %d Shorts with %s",
-                    len(entries),
-                    client,
-                )
-
-                return {
-                    "entries": entries,
-                    "count": len(entries),
-                    "client": client,
-                    "source": shorts_url,
-                }
-
-            if stderr:
-                errors.append(
-                    f"{client}: {stderr[-1500:]}"
-                )
-
-        except HTTPException:
-            raise
-
-        except Exception as exc:
-            logger.exception(
-                "Discovery failed with %s",
-                client,
-            )
-
-            errors.append(
-                f"{client}: {exc}"
-            )
-
-    raise HTTPException(
-        status_code=502,
-        detail=(
-            "YouTube Shorts discovery failed. "
-            + " | ".join(errors)[-5000:]
-        ),
-    )
-
-
-# ============================================================
-# DOWNLOAD
-# ============================================================
-
-@app.post("/download")
-def download(
-    req: DownloadRequest,
-):
-    video_url = (
-        "https://www.youtube.com/shorts/"
-        + req.video_id
-    )
-
-    tempdir = Path(
-        tempfile.mkdtemp(
-            prefix=f"short_{req.video_id}_",
-            dir="/tmp",
-        )
-    )
-
-    output_template = str(
-        tempdir / "%(id)s.%(ext)s"
-    )
-
-    clients = [
-        "mweb",
-        "android_vr",
-        "web_safari",
-    ]
-
-    diagnostics = []
-
-    start_time = time.time()
-
-    try:
-
-        # ----------------------------------------------------
-        # TRY EACH CLIENT
-        # ----------------------------------------------------
-
-        for client_index, client in enumerate(
-            clients,
-            1,
-        ):
-
-            elapsed = (
-                time.time()
-                - start_time
-            )
-
-            if elapsed > 480:
-                raise HTTPException(
-                    status_code=504,
-                    detail=(
-                        "Download took too long. "
-                        "YouTube/network request "
-                        "did not complete."
-                    ),
-                )
-
-            logger.info(
-                "[%d/%d] Processing %s with %s",
-                client_index,
-                len(clients),
-                req.video_id,
-                client,
-            )
-
-            # ------------------------------------------------
-            # STEP 1: GET AVAILABLE FORMATS
-            # ------------------------------------------------
-
-            try:
-                return_code, format_output = (
-                    get_available_formats(
-                        video_url,
-                        client,
-                    )
-                )
-
-            except HTTPException:
-                raise
-
-            except Exception as exc:
-                logger.exception(
-                    "Format discovery failed"
-                )
-
-                diagnostics.append(
-                    "\n"
-                    + "=" * 70
-                    + "\nCLIENT: "
-                    + client
-                    + "\nFORMAT DISCOVERY EXCEPTION:\n"
-                    + str(exc)
-                )
-
-                continue
-
-            logger.info(
-                "[%s] Format check returned %s",
-                client,
-                return_code,
-            )
-
-            # ------------------------------------------------
-            # FORMAT DISCOVERY FAILED
-            # ------------------------------------------------
-
-            if return_code != 0:
-                diagnostics.append(
-                    "\n"
-                    + "=" * 70
-                    + "\nCLIENT: "
-                    + client
-                    + "\nFORMAT DISCOVERY FAILED:\n"
-                    + format_output[-7000:]
-                )
-
-                continue
-
-            # ------------------------------------------------
-            # EXTRACT FORMAT LINES
-            # ------------------------------------------------
-
-            format_lines = []
-
-            for line in format_output.splitlines():
-                stripped = line.strip()
-
-                if not stripped:
-                    continue
-
-                if stripped.startswith("ID "):
-                    continue
-
-                if stripped.startswith(
-                    "────────────────"
-                ):
-                    continue
-
-                if re.match(
-                    r"^[0-9A-Za-z]+(?:\s|\|)",
-                    stripped,
-                ):
-                    format_lines.append(
-                        stripped
-                    )
-
-            if not format_lines:
-                format_lines = (
-                    format_output
-                    .splitlines()
-                )[-100:]
-
-            logger.info(
-                "[%s] Available formats:\n%s",
-                client,
-                "\n".join(
-                    format_lines[-100:]
-                ),
-            )
-
-            # ------------------------------------------------
-            # CLEAN PREVIOUS FILES
-            # ------------------------------------------------
-
-            for old_file in tempdir.iterdir():
-                if old_file.is_file():
-                    try:
-                        old_file.unlink()
-                    except Exception:
-                        pass
-
-            # ------------------------------------------------
-            # STEP 2: DOWNLOAD
-            # ------------------------------------------------
-
-            logger.info(
-                "[%s] Downloading with bv*+ba/b",
-                client,
-            )
-
-            download_result = run_ytdlp(
-                [
-                    "--no-playlist",
-
-                    "--extractor-args",
-                    f"youtube:player_client={client}",
-
-                    "--retries",
-                    "2",
-
-                    "--fragment-retries",
-                    "2",
-
-                    "--file-access-retries",
-                    "2",
-
-                    "--retry-sleep",
-                    "1",
-
-                    "--socket-timeout",
-                    "30",
-
-                    "-f",
-                    "bv*+ba/b",
-
-                    "--merge-output-format",
-                    "mp4",
-
-                    "-o",
-                    output_template,
-
-                    video_url,
-                ],
-                timeout=300,
-            )
-
-            stdout = (
-                download_result.stdout
-                or ""
-            )
-
-            stderr = (
-                download_result.stderr
-                or ""
-            )
-
-            # ------------------------------------------------
-            # CHECK DOWNLOADED FILE
-            # ------------------------------------------------
-
-            files = [
-                file
-                for file in tempdir.iterdir()
-                if (
-                    file.is_file()
-                    and file.stat().st_size > 0
-                )
-            ]
-
-            if (
-                download_result.returncode == 0
-                and files
-            ):
-                source_file = max(
-                    files,
-                    key=lambda file:
-                    file.stat().st_size,
-                )
-
-                logger.info(
-                    "SUCCESS: %s using %s (%d bytes)",
-                    req.video_id,
-                    client,
-                    source_file.stat().st_size,
-                )
-
-                return save_download(
-                    source_file
-                )
-
-            # ------------------------------------------------
-            # SAVE DIAGNOSTIC INFORMATION
-            # ------------------------------------------------
-
-            diagnostics.append(
-                "\n"
-                + "=" * 70
-                + "\nCLIENT: "
-                + client
-                + "\n\nAVAILABLE FORMATS:\n"
-                + "\n".join(
-                    format_lines[-100:]
-                )
-                + "\n\nRAW FORMAT OUTPUT:\n"
-                + format_output[-5000:]
-                + "\n\nDOWNLOAD ERROR:\n"
-                + stderr[-7000:]
-                + "\n\nDOWNLOAD STDOUT:\n"
-                + stdout[-3000:]
-            )
-
-            logger.warning(
-                "[%s] Download failed:\n%s",
-                client,
-                stderr[-2500:],
-            )
-
-        #
+    errors
