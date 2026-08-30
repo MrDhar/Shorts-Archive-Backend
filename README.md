@@ -1,52 +1,31 @@
 # Shorts Archive Backend
 
-Backend for the Shorts Archive Android app.
+FastAPI backend for Shorts Archive.
 
-## What it does
+## Render deployment
 
-- Accepts a public YouTube channel URL at `POST /discover`.
-- Enumerates Shorts without downloading them during discovery.
-- Downloads an individual Short at `POST /download` and streams the resulting MP4.
-- Includes a BgUtils PO-token sidecar for current YouTube extraction requirements.
+Deploy this repository as a Docker Web Service. No second Render service is required.
 
-The yt-dlp project currently recommends a PO-token provider for clients that need it, and notes that YouTube can return HTTP 403 without a valid token. The included `bgutil` provider is the recommended provider listed in the yt-dlp PO Token Guide.
+The Docker image starts both:
 
-## Run
+- FastAPI on Render's `$PORT`
+- bgutil PO-token provider privately on `127.0.0.1:4416`
 
-```bash
-docker compose up -d --build
-```
+The backend explicitly points yt-dlp at the local PO-token provider. This avoids needing a paid Render Private Service.
 
-Then check:
+Health check:
 
-```text
-http://YOUR_SERVER:8000/health
-```
+`/health`
 
-Expected:
+Expected response:
 
-```json
-{"ok":true}
-```
+`{"ok":true}`
 
-## API
+## Environment variables
 
-`POST /discover`
+- `PORT` — supplied automatically by Render
+- `MAX_DISCOVER` — optional, default `5000`
+- `DOWNLOAD_ROOT` — optional, default `/data/downloads`
+- `YTDLP_BIN` — optional, default `yt-dlp`
 
-```json
-{"channel_url":"https://www.youtube.com/@example/shorts"}
-```
-
-Returns a list of discovered video IDs.
-
-`POST /download`
-
-```json
-{"video_id":"dQw4w9WgXcQ"}
-```
-
-Returns the MP4 stream.
-
-## Security
-
-This service is intentionally limited to YouTube HTTP(S) URLs. Before putting it on the public internet, add authentication/rate limiting and a maximum request/download quota. Do not expose the BgUtils port publicly.
+The bgutil provider is pinned to `1.3.1` to match the Python plugin dependency.
