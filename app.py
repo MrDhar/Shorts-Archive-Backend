@@ -13,12 +13,12 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.3.0"
+    version="1.4.0"
 )
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
 DOWNLOAD_ROOT = Path(
@@ -44,14 +44,23 @@ POT_URL = os.getenv(
     "http://127.0.0.1:4416"
 )
 
-# Render Secret File
-COOKIE_FILE = Path(
+# Render Secret File.
+#
+# IMPORTANT:
+# /etc/secrets is read-only.
+# Therefore we copy the cookies to /tmp before
+# giving them to yt-dlp.
+COOKIE_SOURCE = Path(
     "/etc/secrets/cookies.txt"
+)
+
+COOKIE_FILE = Path(
+    "/tmp/yt-dlp-cookies.txt"
 )
 
 
 # ============================================================
-# MODELS
+# REQUEST MODELS
 # ============================================================
 
 class DiscoverRequest(BaseModel):
@@ -68,7 +77,7 @@ class DownloadRequest(BaseModel):
 
 
 # ============================================================
-# URL HELPERS
+# YOUTUBE URL VALIDATION
 # ============================================================
 
 def validate_youtube_url(url: str) -> str:
@@ -145,7 +154,41 @@ def is_channel_url(url: str) -> bool:
 
 
 # ============================================================
-# YT-DLP
+# COOKIE PREPARATION
+# ============================================================
+
+def prepare_cookie_file() -> Path:
+
+    if not COOKIE_SOURCE.exists():
+
+        raise HTTPException(
+            500,
+            "YouTube cookies.txt was not found in "
+            "Render Secret Files"
+        )
+
+    try:
+
+        # Render Secret Files are read-only.
+        # Make a writable copy for yt-dlp.
+
+        shutil.copyfile(
+            COOKIE_SOURCE,
+            COOKIE_FILE
+        )
+
+        return COOKIE_FILE
+
+    except Exception as e:
+
+        raise HTTPException(
+            500,
+            f"Could not prepare YouTube cookies: {e}"
+        )
+
+
+# ============================================================
+# RUN YT-DLP
 # ============================================================
 
 def run_ytdlp(
@@ -153,15 +196,17 @@ def run_ytdlp(
     timeout: int = 180
 ):
 
+    cookie_file = prepare_cookie_file()
+
     cmd = [
         YTDLP,
 
         "--no-warnings",
         "--no-progress",
 
-        # Use Render Secret File.
+        # Use writable copy of Render Secret.
         "--cookies",
-        str(COOKIE_FILE),
+        str(cookie_file),
 
         # PO-token provider.
         "--extractor-args",
@@ -199,7 +244,7 @@ def run_ytdlp(
 
 
 # ============================================================
-# DISCOVERY
+# DISCOVER SHORTS
 # ============================================================
 
 def discover_with_client(
@@ -231,6 +276,7 @@ def discover_with_client(
     )
 
     found = []
+
     seen = set()
 
     for line in r.stdout.splitlines():
@@ -243,18 +289,18 @@ def discover_with_client(
         if not parts:
             continue
 
-        vid = parts[0].strip()
+        video_id = parts[0].strip()
 
         if not re.fullmatch(
             r"[A-Za-z0-9_-]{11}",
-            vid
+            video_id
         ):
             continue
 
-        if vid in seen:
+        if video_id in seen:
             continue
 
-        seen.add(vid)
+        seen.add(video_id)
 
         title = (
             parts[1].strip()
@@ -269,13 +315,15 @@ def discover_with_client(
         )
 
         if not webpage_url:
+
             webpage_url = (
-                f"https://www.youtube.com/shorts/{vid}"
+                "https://www.youtube.com/shorts/"
+                + video_id
             )
 
         found.append(
             {
-                "id": vid,
+                "id": video_id,
                 "title": title,
                 "url": webpage_url,
             }
@@ -298,7 +346,7 @@ def root():
         "ok": True,
         "service": "Shorts Archive Backend",
         "status": "running",
-        "cookies_configured": COOKIE_FILE.exists()
+        "cookies_configured": COOKIE_SOURCE.exists()
     }
 
 
@@ -311,12 +359,12 @@ def health():
 
     return {
         "ok": True,
-        "cookies_configured": COOKIE_FILE.exists()
+        "cookies_configured": COOKIE_SOURCE.exists()
     }
 
 
 # ============================================================
-# DISCOVER
+# DISCOVER ENDPOINT
 # ============================================================
 
 @app.post("/discover")
@@ -331,18 +379,20 @@ def discover(
     if not is_channel_url(
         original_url
     ):
+
         raise HTTPException(
             400,
             "Enter a public YouTube channel URL"
         )
 
-    # Always use Shorts tab.
+    # Always discover from the Shorts tab.
     shorts_url = shorts_channel_url(
         original_url
     )
 
     errors = []
 
+    # Discovery clients.
     clients = (
         "android_vr",
         "tv",
@@ -387,15 +437,19 @@ def discover(
                 f"{client}: {e}"
             )
 
+    error_text = " | ".join(
+        errors
+    )[-5000:]
+
     raise HTTPException(
         502,
         "YouTube Shorts discovery failed. "
-        + " | ".join(errors)[-5000:]
+        + error_text
     )
 
 
 # ============================================================
-# DOWNLOAD
+# DOWNLOAD ENDPOINT
 # ============================================================
 
 @app.post("/download")
@@ -404,9 +458,12 @@ def download(
 ):
 
     video_url = (
-        f"https://www.youtube.com/shorts/"
-        f"{req.video_id}"
+        "https://www.youtube.com/shorts/"
+        + req.video_id
     )
+
+    # Create a unique temporary directory
+    # for this particular download.
 
     tempdir = Path(
         tempfile.mkdtemp(
@@ -420,6 +477,8 @@ def download(
     )
 
     try:
+
+        # Try several YouTube clients.
 
         attempts = [
 
@@ -453,7 +512,8 @@ def download(
 
         for client, fmt in attempts:
 
-            # Remove previous attempt's files.
+            # Clean output from previous attempt.
+
             for old_file in tempdir.iterdir():
 
                 if old_file.is_file():
@@ -496,63 +556,4 @@ def download(
                 ],
 
                 timeout=900
-            )
-
-            files = [
-                p
-                for p in tempdir.iterdir()
-                if p.is_file()
-            ]
-
-            if (
-                r.returncode == 0
-                and files
-            ):
-
-                src = max(
-                    files,
-                    key=lambda p:
-                    p.stat().st_size
-                )
-
-                safe_name = re.sub(
-                    r"[^A-Za-z0-9._-]+",
-                    "_",
-                    src.name
-                )
-
-                final = (
-                    DOWNLOAD_ROOT
-                    / safe_name
-                )
-
-                shutil.copy2(
-                    src,
-                    final
-                )
-
-                return FileResponse(
-                    final,
-                    media_type="video/mp4",
-                    filename=final.name
-                )
-
-            last_error = (
-                r.stderr
-                or r.stdout
-                or "download failed"
-            )[-4000:]
-
-        raise HTTPException(
-            502,
-            "YouTube download failed after all "
-            "download methods were attempted:\n"
-            + last_error
-        )
-
-    finally:
-
-        shutil.rmtree(
-            tempdir,
-            ignore_errors=True
         )
