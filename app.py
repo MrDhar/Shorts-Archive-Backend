@@ -4,12 +4,28 @@ import re
 import shutil
 import subprocess
 import tempfile
+import secrets
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
+
+# ============================================================
+# OPTIONAL GOOGLE / YOUTUBE IMPORTS
+# ============================================================
+
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import Flow
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+except ImportError:
+    Credentials = None
+    Flow = None
+    build = None
+    MediaFileUpload = None
 
 
 # ============================================================
@@ -30,7 +46,7 @@ logger = logging.getLogger("shorts-archive")
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.8.2",
+    version="2.0.0",
 )
 
 
@@ -71,6 +87,41 @@ COOKIE_FILE = Path(
 
 
 # ============================================================
+# GOOGLE / YOUTUBE CONFIG
+# ============================================================
+
+GOOGLE_CLIENT_ID = os.getenv(
+    "GOOGLE_CLIENT_ID",
+    "",
+)
+
+GOOGLE_CLIENT_SECRET = os.getenv(
+    "GOOGLE_CLIENT_SECRET",
+    "",
+)
+
+GOOGLE_REDIRECT_URI = os.getenv(
+    "GOOGLE_REDIRECT_URI",
+    "https://shorts-archive-backend.onrender.com/oauth2callback",
+)
+
+GOOGLE_TOKEN_FILE = Path(
+    os.getenv(
+        "GOOGLE_TOKEN_FILE",
+        "/data/google_token.json",
+    )
+)
+
+YOUTUBE_UPLOAD_SCOPE = (
+    "https://www.googleapis.com/auth/youtube.upload"
+)
+
+# OAuth state is kept temporarily in memory.
+# This is sufficient while the service is running.
+OAUTH_STATES = set()
+
+
+# ============================================================
 # CLIENTS
 # ============================================================
 
@@ -104,6 +155,54 @@ class DiscoverRequest(BaseModel):
 class DownloadRequest(BaseModel):
     video_id: str = Field(
         pattern=r"^[A-Za-z0-9_-]{11}$",
+    )
+
+
+class UploadRequest(BaseModel):
+    video_id: str = Field(
+        pattern=r"^[A-Za-z0-9_-]{11}$",
+    )
+
+    title: str = Field(
+        default="",
+        max_length=100,
+    )
+
+    description: str = Field(
+        default="",
+        max_length=5000,
+    )
+
+    tags: list[str] = Field(
+        default_factory=list,
+    )
+
+    privacy_status: str = Field(
+        default="private",
+    )
+
+
+class ArchiveUploadRequest(BaseModel):
+    video_id: str = Field(
+        pattern=r"^[A-Za-z0-9_-]{11}$",
+    )
+
+    title: str = Field(
+        default="",
+        max_length=100,
+    )
+
+    description: str = Field(
+        default="",
+        max_length=5000,
+    )
+
+    tags: list[str] = Field(
+        default_factory=list,
+    )
+
+    privacy_status: str = Field(
+        default="private",
     )
 
 
@@ -553,157 +652,26 @@ def save_download(
 
 
 # ============================================================
-# ROOT
+# INTERNAL DOWNLOAD TO TEMP FILE
+#
+# IMPORTANT:
+# This is separate from /download.
+# Your existing /download endpoint remains untouched.
 # ============================================================
 
-@app.get("/")
-def root():
-
-    return {
-        "ok": True,
-        "service": "Shorts Archive Backend",
-        "version": "1.8.2",
-        "status": "running",
-        "cookies_configured": (
-            COOKIE_SOURCE.exists()
-        ),
-    }
-
-
-# ============================================================
-# HEALTH
-# ============================================================
-
-@app.get("/health")
-def health():
-
-    return {
-        "ok": True,
-        "cookies_configured": (
-            COOKIE_SOURCE.exists()
-        ),
-    }
-
-
-# ============================================================
-# DISCOVER SHORTS
-# ============================================================
-
-@app.post("/discover")
-def discover(
-    req: DiscoverRequest,
-):
-
-    original_url = validate_youtube_url(
-        req.channel_url
-    )
-
-    if not is_channel_url(
-        original_url
-    ):
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Enter a public YouTube "
-                "channel URL"
-            ),
-        )
-
-    shorts_url = shorts_channel_url(
-        original_url
-    )
-
-    errors = []
-
-    logger.info(
-        "Starting Shorts discovery: %s",
-        shorts_url,
-    )
-
-    for client in DISCOVERY_CLIENTS:
-
-        try:
-
-            logger.info(
-                "Discovery client: %s",
-                client,
-            )
-
-            entries, stderr = (
-                discover_with_client(
-                    shorts_url,
-                    client,
-                )
-            )
-
-            if entries:
-
-                logger.info(
-                    "Discovery succeeded: "
-                    "%d videos via %s",
-                    len(entries),
-                    client,
-                )
-
-                return {
-                    "entries": entries,
-                    "count": len(entries),
-                    "client": client,
-                    "source": shorts_url,
-                }
-
-            if stderr:
-
-                errors.append(
-                    f"{client}: "
-                    f"{stderr[-2500:]}"
-                )
-
-        except HTTPException:
-
-            raise
-
-        except Exception as exc:
-
-            logger.exception(
-                "Discovery exception with %s",
-                client,
-            )
-
-            errors.append(
-                f"{client}: {exc}"
-            )
-
-    raise HTTPException(
-        status_code=502,
-        detail=(
-            "YouTube Shorts discovery failed.\n\n"
-            + "\n\n".join(
-                errors
-            )[-10000:]
-        ),
-    )
-
-
-# ============================================================
-# DOWNLOAD SHORT
-# ============================================================
-
-@app.post("/download")
-def download(
-    req: DownloadRequest,
-):
+def download_to_temp_file(
+    video_id: str,
+) -> Path:
 
     video_url = (
         "https://www.youtube.com/shorts/"
-        + req.video_id
+        + video_id
     )
 
     tempdir = Path(
         tempfile.mkdtemp(
             prefix=(
-                f"short_{req.video_id}_"
+                f"archive_upload_{video_id}_"
             ),
             dir="/tmp",
         )
@@ -718,13 +686,9 @@ def download(
     try:
 
         logger.info(
-            "Starting download for %s",
-            req.video_id,
+            "Starting temporary download for upload: %s",
+            video_id,
         )
-
-        # ----------------------------------------------------
-        # TRY EACH YOUTUBE CLIENT
-        # ----------------------------------------------------
 
         for client in DOWNLOAD_CLIENTS:
 
@@ -732,11 +696,6 @@ def download(
                 "Checking formats with client: %s",
                 client,
             )
-
-            # ------------------------------------------------
-            # STEP 1:
-            # LIST FORMATS FOR THE EXACT SHORT
-            # ------------------------------------------------
 
             try:
 
@@ -770,10 +729,6 @@ def download(
 
                 continue
 
-            # ------------------------------------------------
-            # FORMAT DISCOVERY FAILED
-            # ------------------------------------------------
-
             if format_code != 0:
 
                 diagnostics.append(
@@ -790,10 +745,6 @@ def download(
                 )
 
                 continue
-
-            # ------------------------------------------------
-            # CHECK FOR REAL VIDEO/AUDIO
-            # ------------------------------------------------
 
             if not has_real_media_formats(
                 format_output
@@ -815,11 +766,6 @@ def download(
 
                 continue
 
-            # ------------------------------------------------
-            # STEP 2:
-            # DOWNLOAD
-            # ------------------------------------------------
-
             selectors = [
                 "bv*+ba/b",
                 "best",
@@ -832,8 +778,8 @@ def download(
                 )
 
                 logger.info(
-                    "Downloading %s with %s / %s",
-                    req.video_id,
+                    "Temporary downloading %s with %s / %s",
+                    video_id,
                     client,
                     selector,
                 )
@@ -893,15 +839,13 @@ def download(
                     )
 
                     logger.info(
-                        "Download successful: %s "
+                        "Temporary download successful: %s "
                         "(%d bytes)",
-                        req.video_id,
+                        video_id,
                         source_file.stat().st_size,
                     )
 
-                    return save_download(
-                        source_file
-                    )
+                    return source_file
 
                 stdout = (
                     result.stdout or ""
@@ -926,32 +870,117 @@ def download(
                     + stderr[-5000:]
                 )
 
-        # ----------------------------------------------------
-        # ALL CLIENTS FAILED
-        # ----------------------------------------------------
-
         diagnostic_text = "\n".join(
             diagnostics
         )[-30000:]
 
-        logger.error(
-            "Download failed for %s",
-            req.video_id,
-        )
-
         raise HTTPException(
             status_code=502,
             detail=(
-                "YouTube download failed.\n\n"
-                "Diagnostic information for "
-                "the exact Short:\n\n"
+                "Temporary YouTube download failed.\n\n"
                 + diagnostic_text
             ),
         )
 
-    finally:
+    except Exception:
 
         shutil.rmtree(
             tempdir,
             ignore_errors=True,
+        )
+
+        raise
+
+
+# ============================================================
+# GOOGLE OAUTH HELPERS
+# ============================================================
+
+def google_configured() -> bool:
+
+    return bool(
+        GOOGLE_CLIENT_ID
+        and GOOGLE_CLIENT_SECRET
+        and Flow
     )
+
+
+def make_google_client_config():
+
+    return {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [
+                GOOGLE_REDIRECT_URI,
+            ],
+        }
+    }
+
+
+def save_google_credentials(
+    credentials,
+):
+
+    GOOGLE_TOKEN_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with open(
+        GOOGLE_TOKEN_FILE,
+        "w",
+        encoding="utf-8",
+    ) as token_file:
+
+        token_file.write(
+            credentials.to_json()
+        )
+
+    logger.info(
+        "Google OAuth credentials saved to %s",
+        GOOGLE_TOKEN_FILE,
+    )
+
+
+def load_google_credentials():
+
+    if not GOOGLE_TOKEN_FILE.exists():
+
+        return None
+
+    try:
+
+        credentials = Credentials.from_authorized_user_file(
+            str(GOOGLE_TOKEN_FILE),
+            [YOUTUBE_UPLOAD_SCOPE],
+        )
+
+        return credentials
+
+    except Exception as exc:
+
+        logger.warning(
+            "Could not load Google token: %s",
+            exc,
+        )
+
+        return None
+
+
+def youtube_service():
+
+    if not google_configured():
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Google OAuth is not configured. "
+                "Set GOOGLE_CLIENT_ID and "
+                "GOOGLE_CLIENT_SECRET in Render."
+            ),
+        )
+
+ 
