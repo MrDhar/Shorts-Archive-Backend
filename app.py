@@ -1,11 +1,10 @@
-import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -17,14 +16,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
 DOWNLOAD_ROOT = Path(
     os.getenv("DOWNLOAD_ROOT", "/data/downloads")
 )
-DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+DOWNLOAD_ROOT.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
 
 MAX_DISCOVER = int(
     os.getenv("MAX_DISCOVER", "5000")
 )
+
 
 YTDLP = os.getenv(
     "YTDLP_BIN",
@@ -46,7 +52,10 @@ class DownloadRequest(BaseModel):
 
 
 def validate_youtube_url(url: str) -> str:
-    p = urlparse(url.strip())
+
+    url = url.strip()
+
+    p = urlparse(url)
 
     if p.scheme not in {"http", "https"}:
         raise HTTPException(
@@ -65,22 +74,81 @@ def validate_youtube_url(url: str) -> str:
             "Only public YouTube URLs are supported"
         )
 
-    return url.strip()
+    return url
+
+
+def shorts_channel_url(url: str) -> str:
+    """
+    Convert a normal YouTube channel URL into
+    the channel's /shorts tab.
+
+    Examples:
+
+    /@channel
+        -> /@channel/shorts
+
+    /@channel?si=xxxx
+        -> /@channel/shorts
+
+    /channel/UCxxxx
+        -> /channel/UCxxxx/shorts
+
+    /c/channel
+        -> /c/channel/shorts
+
+    /user/channel
+        -> /user/channel/shorts
+
+    /@channel/shorts
+        -> unchanged
+    """
+
+    p = urlparse(url)
+
+    path = p.path.rstrip("/")
+
+    if not path:
+        raise HTTPException(
+            400,
+            "Enter a valid YouTube channel URL"
+        )
+
+    lower_path = path.lower()
+
+    if lower_path.endswith("/shorts"):
+        shorts_path = path
+
+    else:
+        shorts_path = path + "/shorts"
+
+    return urlunparse(
+        (
+            p.scheme,
+            p.netloc,
+            shorts_path,
+            "",
+            "",
+            ""
+        )
+    )
 
 
 def run_ytdlp(
     args: list[str],
     timeout: int = 180
 ):
+
     cmd = [
         YTDLP,
         "--no-warnings",
         "--no-progress",
+
         "--extractor-args",
         "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
     ] + args
 
     try:
+
         return subprocess.run(
             cmd,
             capture_output=True,
@@ -89,12 +157,14 @@ def run_ytdlp(
         )
 
     except FileNotFoundError:
+
         raise HTTPException(
             500,
             "yt-dlp is not installed on the backend"
         )
 
     except subprocess.TimeoutExpired:
+
         raise HTTPException(
             504,
             "YouTube request timed out"
@@ -105,58 +175,83 @@ def discover_with_client(
     url: str,
     client: str
 ):
-    # Flat extraction avoids downloading media
-    # during discovery.
+
     r = run_ytdlp(
         [
             "--flat-playlist",
+
             "--lazy-playlist",
+
             "--ignore-errors",
+
             "--extractor-args",
             f"youtube:player_client={client}",
+
             "--print",
             "%(id)s\t%(title)s\t%(webpage_url)s",
+
             "--skip-download",
+
             url,
         ],
         timeout=240
     )
 
     found = []
+
     seen = set()
 
     for line in r.stdout.splitlines():
-        parts = line.split("\t", 2)
+
+        parts = line.split(
+            "\t",
+            2
+        )
 
         if not parts:
             continue
 
         vid = parts[0].strip()
 
-        if (
-            not re.fullmatch(
-                r"[A-Za-z0-9_-]{11}",
-                vid
-            )
-            or vid in seen
+        if not re.fullmatch(
+            r"[A-Za-z0-9_-]{11}",
+            vid
         ):
+            continue
+
+        if vid in seen:
             continue
 
         seen.add(vid)
 
+        title = (
+            parts[1].strip()
+            if len(parts) > 1
+            else ""
+        )
+
+        webpage_url = (
+            parts[2].strip()
+            if len(parts) > 2
+            else ""
+        )
+
+        # Since discovery is performed against the
+        # channel's /shorts tab, every returned entry
+        # is intended to be a Short.
+        #
+        # We still return the canonical Shorts URL
+        # rather than trusting a possibly missing URL.
+        if not webpage_url:
+            webpage_url = (
+                f"https://www.youtube.com/shorts/{vid}"
+            )
+
         found.append(
             {
                 "id": vid,
-                "title": (
-                    parts[1].strip()
-                    if len(parts) > 1
-                    else ""
-                ),
-                "url": (
-                    parts[2].strip()
-                    if len(parts) > 2
-                    else f"https://www.youtube.com/shorts/{vid}"
-                ),
+                "title": title,
+                "url": webpage_url,
             }
         )
 
@@ -167,6 +262,7 @@ def discover_with_client(
 
 
 def is_channel_url(url: str) -> bool:
+
     path = urlparse(
         url
     ).path.rstrip("/").lower()
@@ -182,68 +278,102 @@ def is_channel_url(url: str) -> bool:
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+
+    return {
+        "ok": True
+    }
 
 
 @app.post("/discover")
-def discover(req: DiscoverRequest):
-    url = validate_youtube_url(
+def discover(
+    req: DiscoverRequest
+):
+
+    original_url = validate_youtube_url(
         req.channel_url
     )
 
-    if not is_channel_url(url):
+    if not is_channel_url(
+        original_url
+    ):
         raise HTTPException(
             400,
             "Enter a public YouTube channel URL"
         )
 
+    # IMPORTANT:
+    # Always use the channel's Shorts tab.
+    #
+    # This prevents a normal channel URL such as
+    # https://youtube.com/@mrbeast
+    # from returning the channel's entire
+    # video library.
+    shorts_url = shorts_channel_url(
+        original_url
+    )
+
     errors = []
 
-    # Discovery clients.
-    for client in (
+    clients = (
         "android_vr",
         "tv",
         "web_embedded",
         "mweb",
-    ):
+    )
+
+    for client in clients:
+
         try:
+
             entries, stderr = discover_with_client(
-                url,
+                shorts_url,
                 client
             )
 
             if entries:
+
                 return {
                     "entries": entries,
                     "count": len(entries),
                     "client": client,
+                    "source": shorts_url,
                 }
 
             if stderr:
+
                 errors.append(
                     f"{client}: {stderr[-1200:]}"
                 )
 
         except HTTPException:
+
             raise
 
         except Exception as e:
+
             errors.append(
                 f"{client}: {e}"
             )
 
+    error_text = " | ".join(
+        errors
+    )[-5000:]
+
     raise HTTPException(
         502,
-        "YouTube discovery failed. "
-        + " | ".join(errors)[-5000:]
+        "YouTube Shorts discovery failed. "
+        + error_text
     )
 
 
 @app.post("/download")
-def download(req: DownloadRequest):
+def download(
+    req: DownloadRequest
+):
+
     video_url = (
-        f"https://www.youtube.com/shorts/"
-        f"{req.video_id}"
+        "https://www.youtube.com/shorts/"
+        + req.video_id
     )
 
     tempdir = Path(
@@ -258,23 +388,48 @@ def download(req: DownloadRequest):
     )
 
     try:
-        # Try several YouTube clients.
-        # Start with clients that can work without
-        # browser cookies, then try clients that can
-        # use the configured PO-token provider.
+
+        # Download attempts for each Short.
+        #
+        # The Android app can call this endpoint
+        # once for every item in the discovered
+        # Shorts list, which preserves the existing
+        # Download All workflow.
         attempts = [
-            ("android_vr", "18/b"),
-            ("tv", "bv*+ba/b"),
-            ("web_embedded", "bv*+ba/b"),
-            ("web_safari", "bv*+ba/b"),
-            ("mweb", "bv*+ba/b"),
+
+            (
+                "android_vr",
+                "18/b"
+            ),
+
+            (
+                "tv",
+                "bv*+ba/b"
+            ),
+
+            (
+                "web_embedded",
+                "bv*+ba/b"
+            ),
+
+            (
+                "web_safari",
+                "bv*+ba/b"
+            ),
+
+            (
+                "mweb",
+                "bv*+ba/b"
+            ),
         ]
 
         last_error = ""
 
         for client, fmt in attempts:
+
             r = run_ytdlp(
                 [
+
                     "--no-playlist",
 
                     "--extractor-args",
@@ -300,7 +455,11 @@ def download(req: DownloadRequest):
                 if p.is_file()
             ]
 
-            if r.returncode == 0 and files:
+            if (
+                r.returncode == 0
+                and files
+            ):
+
                 src = max(
                     files,
                     key=lambda p: p.stat().st_size
@@ -313,7 +472,8 @@ def download(req: DownloadRequest):
                 )
 
                 final = (
-                    DOWNLOAD_ROOT / safe_name
+                    DOWNLOAD_ROOT
+                    / safe_name
                 )
 
                 shutil.copy2(
@@ -331,7 +491,7 @@ def download(req: DownloadRequest):
                 r.stderr
                 or r.stdout
                 or "download failed"
-            )[-2000:]
+            )[-3000:]
 
         raise HTTPException(
             502,
@@ -340,6 +500,7 @@ def download(req: DownloadRequest):
         )
 
     finally:
+
         shutil.rmtree(
             tempdir,
             ignore_errors=True
