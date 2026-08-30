@@ -30,7 +30,7 @@ logger = logging.getLogger("shorts-archive")
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.8.1",
+    version="1.8.2",
 )
 
 
@@ -71,14 +71,22 @@ COOKIE_FILE = Path(
 
 
 # ============================================================
-# YOUTUBE CLIENT ORDER
+# CLIENTS
 # ============================================================
 
-CLIENTS = [
-    "default,mweb",
-    "web_safari",
-    "android_vr",
+DISCOVERY_CLIENTS = [
     "mweb",
+    "android_vr",
+    "web_embedded",
+    "tv",
+]
+
+DOWNLOAD_CLIENTS = [
+    "mweb",
+    "android_vr",
+    "web_safari",
+    "web_embedded",
+    "tv",
 ]
 
 
@@ -141,14 +149,12 @@ def shorts_channel_url(url: str) -> str:
     path = parsed.path.rstrip("/")
 
     if not path:
-
         raise HTTPException(
             status_code=400,
             detail="Enter a valid YouTube channel URL",
         )
 
     if not path.lower().endswith("/shorts"):
-
         path += "/shorts"
 
     return urlunparse(
@@ -215,7 +221,7 @@ def prepare_cookie_file() -> Path:
 
 
 # ============================================================
-# OPTIONAL JAVASCRIPT RUNTIME
+# JAVASCRIPT RUNTIME
 # ============================================================
 
 def js_runtime_args() -> list[str]:
@@ -240,7 +246,7 @@ def js_runtime_args() -> list[str]:
             ]
 
     logger.warning(
-        "No JS runtime detected"
+        "No JavaScript runtime detected"
     )
 
     return []
@@ -282,7 +288,7 @@ def run_ytdlp(
     )
 
     logger.info(
-        "yt-dlp args: %s",
+        "Running yt-dlp: %s",
         " ".join(args),
     )
 
@@ -299,14 +305,19 @@ def run_ytdlp(
 
         raise HTTPException(
             status_code=500,
-            detail="yt-dlp is not installed on the backend",
+            detail=(
+                "yt-dlp is not installed "
+                "on the backend"
+            ),
         )
 
     except subprocess.TimeoutExpired:
 
         raise HTTPException(
             status_code=504,
-            detail="YouTube request timed out",
+            detail=(
+                "YouTube request timed out"
+            ),
         )
 
 
@@ -370,13 +381,11 @@ def discover_with_client(
         title = ""
 
         if len(parts) > 1:
-
             title = parts[1].strip()
 
         webpage_url = ""
 
         if len(parts) > 2:
-
             webpage_url = parts[2].strip()
 
         if not webpage_url:
@@ -395,7 +404,6 @@ def discover_with_client(
         )
 
         if len(found) >= MAX_DISCOVER:
-
             break
 
     return (
@@ -405,7 +413,7 @@ def discover_with_client(
 
 
 # ============================================================
-# TEMP DIRECTORY HELPERS
+# TEMP DIRECTORY
 # ============================================================
 
 def clean_tempdir(
@@ -417,15 +425,12 @@ def clean_tempdir(
         if item.is_file():
 
             try:
-
                 item.unlink()
-
             except OSError:
-
                 pass
 
 
-def downloaded_files(
+def get_downloaded_files(
     tempdir: Path,
 ):
 
@@ -443,7 +448,7 @@ def downloaded_files(
 # FORMAT DISCOVERY
 # ============================================================
 
-def get_formats(
+def get_available_formats(
     video_url: str,
     client: str,
 ):
@@ -469,21 +474,20 @@ def get_formats(
     )
 
 
-def has_media_formats(
-    output: str,
+def has_real_media_formats(
+    format_output: str,
 ) -> bool:
 
-    for line in output.splitlines():
+    for line in format_output.splitlines():
 
         lowered = line.lower()
 
         if "mhtml" in lowered:
-
             continue
 
         if any(
-            value in lowered
-            for value in (
+            marker in lowered
+            for marker in (
                 "video only",
                 "audio only",
                 "mp4",
@@ -534,7 +538,7 @@ def save_download(
     )
 
     logger.info(
-        "Saved file: %s",
+        "Saved download: %s",
         final_file,
     )
 
@@ -558,9 +562,11 @@ def root():
     return {
         "ok": True,
         "service": "Shorts Archive Backend",
-        "version": "1.8.1",
+        "version": "1.8.2",
         "status": "running",
-        "cookies_configured": COOKIE_SOURCE.exists(),
+        "cookies_configured": (
+            COOKIE_SOURCE.exists()
+        ),
     }
 
 
@@ -573,7 +579,9 @@ def health():
 
     return {
         "ok": True,
-        "cookies_configured": COOKIE_SOURCE.exists(),
+        "cookies_configured": (
+            COOKIE_SOURCE.exists()
+        ),
     }
 
 
@@ -596,7 +604,10 @@ def discover(
 
         raise HTTPException(
             status_code=400,
-            detail="Enter a public YouTube channel URL",
+            detail=(
+                "Enter a public YouTube "
+                "channel URL"
+            ),
         )
 
     shorts_url = shorts_channel_url(
@@ -606,28 +617,16 @@ def discover(
     errors = []
 
     logger.info(
-        "========================================"
-    )
-
-    logger.info(
-        "STARTING SHORTS DISCOVERY"
-    )
-
-    logger.info(
-        "SOURCE: %s",
+        "Starting Shorts discovery: %s",
         shorts_url,
     )
 
-    logger.info(
-        "========================================"
-    )
-
-    for client in CLIENTS:
+    for client in DISCOVERY_CLIENTS:
 
         try:
 
             logger.info(
-                "Trying discovery client: %s",
+                "Discovery client: %s",
                 client,
             )
 
@@ -641,9 +640,10 @@ def discover(
             if entries:
 
                 logger.info(
-                    "Discovery succeeded with %s: %d videos",
-                    client,
+                    "Discovery succeeded: "
+                    "%d videos via %s",
                     len(entries),
+                    client,
                 )
 
                 return {
@@ -656,7 +656,8 @@ def discover(
             if stderr:
 
                 errors.append(
-                    f"{client}: {stderr[-2500:]}"
+                    f"{client}: "
+                    f"{stderr[-2500:]}"
                 )
 
         except HTTPException:
@@ -666,7 +667,7 @@ def discover(
         except Exception as exc:
 
             logger.exception(
-                "Discovery failed with %s",
+                "Discovery exception with %s",
                 client,
             )
 
@@ -674,15 +675,13 @@ def discover(
                 f"{client}: {exc}"
             )
 
-    error_text = "\n\n".join(
-        errors
-    )
-
     raise HTTPException(
         status_code=502,
         detail=(
             "YouTube Shorts discovery failed.\n\n"
-            + error_text[-10000:]
+            + "\n\n".join(
+                errors
+            )[-10000:]
         ),
     )
 
@@ -703,7 +702,9 @@ def download(
 
     tempdir = Path(
         tempfile.mkdtemp(
-            prefix=f"short_{req.video_id}_",
+            prefix=(
+                f"short_{req.video_id}_"
+            ),
             dir="/tmp",
         )
     )
@@ -717,54 +718,33 @@ def download(
     try:
 
         logger.info(
-            "========================================"
-        )
-
-        logger.info(
-            "STARTING DOWNLOAD"
-        )
-
-        logger.info(
-            "VIDEO ID: %s",
+            "Starting download for %s",
             req.video_id,
         )
 
-        logger.info(
-            "URL: %s",
-            video_url,
-        )
+        # ----------------------------------------------------
+        # TRY EACH YOUTUBE CLIENT
+        # ----------------------------------------------------
 
-        logger.info(
-            "========================================"
-        )
-
-        for client in CLIENTS:
+        for client in DOWNLOAD_CLIENTS:
 
             logger.info(
-                "----------------------------------------"
-            )
-
-            logger.info(
-                "CLIENT: %s",
+                "Checking formats with client: %s",
                 client,
             )
 
-            logger.info(
-                "----------------------------------------"
-            )
-
-            # =================================================
-            # STEP 1
-            # ASK YT-DLP FOR ACTUAL FORMATS
-            # =================================================
+            # ------------------------------------------------
+            # STEP 1:
+            # LIST FORMATS FOR THE EXACT SHORT
+            # ------------------------------------------------
 
             try:
 
                 (
-                    format_return_code,
+                    format_code,
                     format_output,
                     format_error,
-                ) = get_formats(
+                ) = get_available_formats(
                     video_url,
                     client,
                 )
@@ -790,17 +770,11 @@ def download(
 
                 continue
 
-            logger.info(
-                "[%s] format return code: %s",
-                client,
-                format_return_code,
-            )
+            # ------------------------------------------------
+            # FORMAT DISCOVERY FAILED
+            # ------------------------------------------------
 
-            # =================================================
-            # FORMAT CHECK FAILED
-            # =================================================
-
-            if format_return_code != 0:
+            if format_code != 0:
 
                 diagnostics.append(
                     "\n"
@@ -808,23 +782,25 @@ def download(
                     + "\nCLIENT: "
                     + client
                     + "\nFORMAT DISCOVERY FAILED:\n"
-                    + format_output[-5000:]
-                    + "\n"
-                    + format_error[-5000:]
+                    + (
+                        format_output
+                        + "\n"
+                        + format_error
+                    )[-7000:]
                 )
 
                 continue
 
-            # =================================================
-            # CHECK FOR REAL MEDIA
-            # =================================================
+            # ------------------------------------------------
+            # CHECK FOR REAL VIDEO/AUDIO
+            # ------------------------------------------------
 
-            if not has_media_formats(
+            if not has_real_media_formats(
                 format_output
             ):
 
                 logger.warning(
-                    "[%s] No real media formats found",
+                    "[%s] No real media formats",
                     client,
                 )
 
@@ -833,25 +809,16 @@ def download(
                     + ("=" * 60)
                     + "\nCLIENT: "
                     + client
-                    + "\nNO REAL MEDIA FORMATS.\n"
-                    + "Only storyboard formats appear to be available:\n"
-                    + format_output[-6000:]
+                    + "\nNO REAL MEDIA FORMATS FOUND.\n"
+                    + format_output[-7000:]
                 )
 
                 continue
 
-            logger.info(
-                "[%s] Real media formats detected",
-                client,
-            )
-
-            # =================================================
-            # STEP 2
+            # ------------------------------------------------
+            # STEP 2:
             # DOWNLOAD
-            # =================================================
-
-            last_stdout = ""
-            last_stderr = ""
+            # ------------------------------------------------
 
             selectors = [
                 "bv*+ba/b",
@@ -865,7 +832,8 @@ def download(
                 )
 
                 logger.info(
-                    "[%s] Download selector: %s",
+                    "Downloading %s with %s / %s",
+                    req.video_id,
                     client,
                     selector,
                 )
@@ -875,7 +843,10 @@ def download(
                         "--no-playlist",
 
                         "--extractor-args",
-                        f"youtube:player_client={client}",
+                        (
+                            "youtube:"
+                            f"player_client={client}"
+                        ),
 
                         "--retries",
                         "2",
@@ -906,15 +877,7 @@ def download(
                     timeout=300,
                 )
 
-                last_stdout = (
-                    result.stdout or ""
-                )
-
-                last_stderr = (
-                    result.stderr or ""
-                )
-
-                files = downloaded_files(
+                files = get_downloaded_files(
                     tempdir
                 )
 
@@ -930,44 +893,65 @@ def download(
                     )
 
                     logger.info(
-                        "DOWNLOAD SUCCESS: %s",
+                        "Download successful: %s "
+                        "(%d bytes)",
                         req.video_id,
+                        source_file.stat().st_size,
                     )
 
                     return save_download(
                         source_file
                     )
 
-                logger.warning(
-                    "[%s] Selector failed: %s",
-                    selector,
-                    last_stderr[-1500:],
+                stdout = (
+                    result.stdout or ""
                 )
 
-            # =================================================
-            # CLIENT FAILED
-            # =================================================
+                stderr = (
+                    result.stderr or ""
+                )
 
-            diagnostics.append(
-                "\n"
-                + ("=" * 60)
-                + "\nCLIENT: "
-                + client
-                + "\nAVAILABLE FORMATS:\n"
-                + format_output[-7000:]
-                + "\nDOWNLOAD STDOUT:\n"
-                + last_stdout[-3000:]
-                + "\nDOWNLOAD STDERR:\n"
-                + last_stderr[-7000:]
-            )
+                diagnostics.append(
+                    "\n"
+                    + ("=" * 60)
+                    + "\nCLIENT: "
+                    + client
+                    + "\nFORMAT SELECTOR: "
+                    + selector
+                    + "\nAVAILABLE FORMATS:\n"
+                    + format_output[-5000:]
+                    + "\nDOWNLOAD STDOUT:\n"
+                    + stdout[-2500:]
+                    + "\nDOWNLOAD STDERR:\n"
+                    + stderr[-5000:]
+                )
 
-        # =====================================================
-        # EVERYTHING FAILED
-        # =====================================================
+        # ----------------------------------------------------
+        # ALL CLIENTS FAILED
+        # ----------------------------------------------------
 
         diagnostic_text = "\n".join(
             diagnostics
-        )
+        )[-30000:]
 
         logger.error(
-            "ALL DOWNLOAD CLIEN
+            "Download failed for %s",
+            req.video_id,
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "YouTube download failed.\n\n"
+                "Diagnostic information for "
+                "the exact Short:\n\n"
+                + diagnostic_text
+            ),
+        )
+
+    finally:
+
+        shutil.rmtree(
+            tempdir,
+            ignore_errors=True,
+    )
