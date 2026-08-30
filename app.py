@@ -13,28 +13,26 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.0.0"
+    version="1.1.0"
 )
-
 
 DOWNLOAD_ROOT = Path(
     os.getenv("DOWNLOAD_ROOT", "/data/downloads")
 )
-
-DOWNLOAD_ROOT.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
+DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 MAX_DISCOVER = int(
     os.getenv("MAX_DISCOVER", "5000")
 )
 
-
 YTDLP = os.getenv(
     "YTDLP_BIN",
     "yt-dlp"
+)
+
+POT_URL = os.getenv(
+    "POT_PROVIDER_URL",
+    "http://127.0.0.1:4416"
 )
 
 
@@ -78,30 +76,6 @@ def validate_youtube_url(url: str) -> str:
 
 
 def shorts_channel_url(url: str) -> str:
-    """
-    Convert a normal YouTube channel URL into
-    the channel's /shorts tab.
-
-    Examples:
-
-    /@channel
-        -> /@channel/shorts
-
-    /@channel?si=xxxx
-        -> /@channel/shorts
-
-    /channel/UCxxxx
-        -> /channel/UCxxxx/shorts
-
-    /c/channel
-        -> /c/channel/shorts
-
-    /user/channel
-        -> /user/channel/shorts
-
-    /@channel/shorts
-        -> unchanged
-    """
 
     p = urlparse(url)
 
@@ -113,11 +87,8 @@ def shorts_channel_url(url: str) -> str:
             "Enter a valid YouTube channel URL"
         )
 
-    lower_path = path.lower()
-
-    if lower_path.endswith("/shorts"):
+    if path.lower().endswith("/shorts"):
         shorts_path = path
-
     else:
         shorts_path = path + "/shorts"
 
@@ -140,11 +111,21 @@ def run_ytdlp(
 
     cmd = [
         YTDLP,
+
         "--no-warnings",
         "--no-progress",
 
+        # Use the local bgutil PO-token provider.
+        #
+        # disable_innertube=1 is useful with some
+        # bgutil/provider configurations when the
+        # normal Innertube path is failing.
         "--extractor-args",
-        "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+        (
+            "youtubepot-bgutilhttp:"
+            f"base_url={POT_URL};"
+            "disable_innertube=1"
+        ),
     ] + args
 
     try:
@@ -179,9 +160,7 @@ def discover_with_client(
     r = run_ytdlp(
         [
             "--flat-playlist",
-
             "--lazy-playlist",
-
             "--ignore-errors",
 
             "--extractor-args",
@@ -198,15 +177,11 @@ def discover_with_client(
     )
 
     found = []
-
     seen = set()
 
     for line in r.stdout.splitlines():
 
-        parts = line.split(
-            "\t",
-            2
-        )
+        parts = line.split("\t", 2)
 
         if not parts:
             continue
@@ -236,12 +211,6 @@ def discover_with_client(
             else ""
         )
 
-        # Since discovery is performed against the
-        # channel's /shorts tab, every returned entry
-        # is intended to be a Short.
-        #
-        # We still return the canonical Shorts URL
-        # rather than trusting a possibly missing URL.
         if not webpage_url:
             webpage_url = (
                 f"https://www.youtube.com/shorts/{vid}"
@@ -276,6 +245,16 @@ def is_channel_url(url: str) -> bool:
     )
 
 
+@app.get("/")
+def root():
+
+    return {
+        "ok": True,
+        "service": "Shorts Archive Backend",
+        "status": "running"
+    }
+
+
 @app.get("/health")
 def health():
 
@@ -302,18 +281,18 @@ def discover(
         )
 
     # IMPORTANT:
-    # Always use the channel's Shorts tab.
-    #
-    # This prevents a normal channel URL such as
-    # https://youtube.com/@mrbeast
-    # from returning the channel's entire
-    # video library.
+    # Always discover from the Shorts tab.
     shorts_url = shorts_channel_url(
         original_url
     )
 
     errors = []
 
+    # Keep discovery clients separate from
+    # download clients.
+    #
+    # These clients are being used only to
+    # enumerate the Shorts tab.
     clients = (
         "android_vr",
         "tv",
@@ -355,14 +334,10 @@ def discover(
                 f"{client}: {e}"
             )
 
-    error_text = " | ".join(
-        errors
-    )[-5000:]
-
     raise HTTPException(
         502,
         "YouTube Shorts discovery failed. "
-        + error_text
+        + " | ".join(errors)[-5000:]
     )
 
 
@@ -372,8 +347,7 @@ def download(
 ):
 
     video_url = (
-        "https://www.youtube.com/shorts/"
-        + req.video_id
+        f"https://www.youtube.com/shorts/{req.video_id}"
     )
 
     tempdir = Path(
@@ -389,17 +363,32 @@ def download(
 
     try:
 
-        # Download attempts for each Short.
+        # IMPORTANT:
         #
-        # The Android app can call this endpoint
-        # once for every item in the discovered
-        # Shorts list, which preserves the existing
-        # Download All workflow.
+        # mweb is now FIRST because the current
+        # yt-dlp recommendation is to use mweb
+        # together with a PO-token provider.
+        #
+        # web_safari is useful as another fallback
+        # because HLS formats can avoid some GVS
+        # PO-token requirements.
+        #
+        # android_vr/tv are kept as fallbacks.
         attempts = [
 
             (
+                "mweb",
+                "bv*+ba/b"
+            ),
+
+            (
+                "web_safari",
+                "bv*+ba/b"
+            ),
+
+            (
                 "android_vr",
-                "18/b"
+                "bv*+ba/b"
             ),
 
             (
@@ -411,21 +400,22 @@ def download(
                 "web_embedded",
                 "bv*+ba/b"
             ),
-
-            (
-                "web_safari",
-                "bv*+ba/b"
-            ),
-
-            (
-                "mweb",
-                "bv*+ba/b"
-            ),
         ]
 
         last_error = ""
 
         for client, fmt in attempts:
+
+            # Clean temporary output from a
+            # previous attempt.
+            for old_file in tempdir.iterdir():
+
+                if old_file.is_file():
+
+                    try:
+                        old_file.unlink()
+                    except Exception:
+                        pass
 
             r = run_ytdlp(
                 [
@@ -434,6 +424,15 @@ def download(
 
                     "--extractor-args",
                     f"youtube:player_client={client}",
+
+                    "--retries",
+                    "3",
+
+                    "--fragment-retries",
+                    "3",
+
+                    "--file-access-retries",
+                    "3",
 
                     "-f",
                     fmt,
@@ -491,11 +490,12 @@ def download(
                 r.stderr
                 or r.stdout
                 or "download failed"
-            )[-3000:]
+            )[-4000:]
 
         raise HTTPException(
             502,
-            "YouTube download failed: "
+            "YouTube download failed after all "
+            "download methods were attempted:\n"
             + last_error
         )
 
@@ -504,4 +504,4 @@ def download(
         shutil.rmtree(
             tempdir,
             ignore_errors=True
-        )
+            )
