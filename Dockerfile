@@ -6,7 +6,10 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# System dependencies
+# ------------------------------------------------------------
+# System packages
+# ------------------------------------------------------------
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
@@ -14,15 +17,7 @@ RUN apt-get update \
         ffmpeg \
         ca-certificates \
         git \
-        curl \
     && rm -rf /var/lib/apt/lists/*
-
-# ------------------------------------------------------------
-# Install Deno
-# ------------------------------------------------------------
-
-RUN curl -fsSL https://deno.land/install.sh | sh \
-    && ln -sf /root/.deno/bin/deno /usr/local/bin/deno
 
 # ------------------------------------------------------------
 # Build bgutil PO-token HTTP provider
@@ -46,8 +41,10 @@ COPY requirements.txt .
 RUN pip3 install \
         --no-cache-dir \
         --break-system-packages \
-        -r requirements.txt \
-    && pip3 install \
+        -r requirements.txt
+
+# Install the bgutil yt-dlp plugin.
+RUN pip3 install \
         --no-cache-dir \
         --break-system-packages \
         "bgutil-ytdlp-pot-provider==1.3.1"
@@ -62,6 +59,6 @@ COPY start.sh .
 RUN chmod +x /app/start.sh \
     && mkdir -p /data/downloads
 
-EXPOSE 10000 4416
+EXPOSE 10000
 
 CMD ["/app/start.sh"]
