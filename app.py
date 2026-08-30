@@ -13,12 +13,12 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="1.4.1"
+    version="1.5.0"
 )
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 DOWNLOAD_ROOT = Path(
@@ -44,20 +44,20 @@ POT_URL = os.getenv(
     "http://127.0.0.1:4416"
 )
 
-# Render Secret File
-# This file is READ-ONLY.
+# Render Secret File.
+# This location is read-only.
 COOKIE_SOURCE = Path(
     "/etc/secrets/cookies.txt"
 )
 
-# Writable copy used by yt-dlp.
+# yt-dlp receives a writable copy.
 COOKIE_FILE = Path(
     "/tmp/yt-dlp-cookies.txt"
 )
 
 
 # ============================================================
-# REQUEST MODELS
+# MODELS
 # ============================================================
 
 class DiscoverRequest(BaseModel):
@@ -74,16 +74,16 @@ class DownloadRequest(BaseModel):
 
 
 # ============================================================
-# YOUTUBE URL HELPERS
+# YOUTUBE URL VALIDATION
 # ============================================================
 
 def validate_youtube_url(url: str) -> str:
 
     url = url.strip()
 
-    p = urlparse(url)
+    parsed = urlparse(url)
 
-    if p.scheme not in {
+    if parsed.scheme not in {
         "http",
         "https"
     }:
@@ -92,7 +92,7 @@ def validate_youtube_url(url: str) -> str:
             detail="Only public YouTube URLs are supported"
         )
 
-    if p.netloc.lower() not in {
+    if parsed.netloc.lower() not in {
         "youtube.com",
         "www.youtube.com",
         "m.youtube.com",
@@ -108,9 +108,9 @@ def validate_youtube_url(url: str) -> str:
 
 def shorts_channel_url(url: str) -> str:
 
-    p = urlparse(url)
+    parsed = urlparse(url)
 
-    path = p.path.rstrip("/")
+    path = parsed.path.rstrip("/")
 
     if not path:
         raise HTTPException(
@@ -125,8 +125,8 @@ def shorts_channel_url(url: str) -> str:
 
     return urlunparse(
         (
-            p.scheme,
-            p.netloc,
+            parsed.scheme,
+            parsed.netloc,
             shorts_path,
             "",
             "",
@@ -151,7 +151,7 @@ def is_channel_url(url: str) -> bool:
 
 
 # ============================================================
-# COOKIE HANDLING
+# COOKIES
 # ============================================================
 
 def prepare_cookie_file() -> Path:
@@ -175,11 +175,14 @@ def prepare_cookie_file() -> Path:
 
         return COOKIE_FILE
 
-    except Exception as e:
+    except Exception as exc:
 
         raise HTTPException(
             status_code=500,
-            detail=f"Could not prepare YouTube cookies: {e}"
+            detail=(
+                "Could not prepare YouTube cookies: "
+                + str(exc)
+            )
         )
 
 
@@ -194,13 +197,13 @@ def run_ytdlp(
 
     cookie_file = prepare_cookie_file()
 
-    cmd = [
+    command = [
         YTDLP,
 
         "--no-warnings",
         "--no-progress",
 
-        # Writable cookie copy.
+        # Use writable copy of cookies.
         "--cookies",
         str(cookie_file),
 
@@ -213,12 +216,12 @@ def run_ytdlp(
         ),
     ]
 
-    cmd.extend(args)
+    command.extend(args)
 
     try:
 
         return subprocess.run(
-            cmd,
+            command,
             capture_output=True,
             text=True,
             timeout=timeout
@@ -248,7 +251,7 @@ def discover_with_client(
     client: str
 ):
 
-    r = run_ytdlp(
+    result = run_ytdlp(
         [
             "--flat-playlist",
 
@@ -270,9 +273,10 @@ def discover_with_client(
     )
 
     found = []
+
     seen = set()
 
-    for line in r.stdout.splitlines():
+    for line in result.stdout.splitlines():
 
         parts = line.split(
             "\t",
@@ -297,12 +301,12 @@ def discover_with_client(
 
         title = ""
 
-        if len(parts) > 1:
+        if len(parts) >= 2:
             title = parts[1].strip()
 
         webpage_url = ""
 
-        if len(parts) > 2:
+        if len(parts) >= 3:
             webpage_url = parts[2].strip()
 
         if not webpage_url:
@@ -323,7 +327,7 @@ def discover_with_client(
         if len(found) >= MAX_DISCOVER:
             break
 
-    return found, r.stderr
+    return found, result.stderr
 
 
 # ============================================================
@@ -355,7 +359,7 @@ def health():
 
 
 # ============================================================
-# DISCOVER SHORTS
+# DISCOVER ALL SHORTS
 # ============================================================
 
 @app.post("/discover")
@@ -376,18 +380,19 @@ def discover(
             detail="Enter a public YouTube channel URL"
         )
 
+    # Always use the channel's Shorts tab.
     shorts_url = shorts_channel_url(
         original_url
     )
 
     errors = []
 
-    clients = (
+    clients = [
         "android_vr",
         "tv",
         "web_embedded",
         "mweb",
-    )
+    ]
 
     for client in clients:
 
@@ -419,29 +424,27 @@ def discover(
 
             raise
 
-        except Exception as e:
+        except Exception as exc:
 
             errors.append(
-                f"{client}: {e}"
+                f"{client}: {exc}"
             )
 
     error_text = " | ".join(
         errors
     )
 
-    error_text = error_text[-5000:]
-
     raise HTTPException(
         status_code=502,
         detail=(
             "YouTube Shorts discovery failed. "
-            + error_text
+            + error_text[-5000:]
         )
     )
 
 
 # ============================================================
-# DOWNLOAD ONE SHORT
+# DOWNLOAD
 # ============================================================
 
 @app.post("/download")
@@ -461,40 +464,25 @@ def download(
         )
     )
 
-    out_template = str(
+    output_template = str(
         tempdir / "%(id)s.%(ext)s"
     )
 
     try:
 
-        attempts = [
-            (
-                "mweb",
-                "bv*+ba/b"
-            ),
-            (
-                "web_safari",
-                "bv*+ba/b"
-            ),
-            (
-                "android_vr",
-                "bv*+ba/b"
-            ),
-            (
-                "tv",
-                "bv*+ba/b"
-            ),
-            (
-                "web_embedded",
-                "bv*+ba/b"
-            ),
+        clients = [
+            "mweb",
+            "web_safari",
+            "android_vr",
+            "tv",
+            "web_embedded",
         ]
 
         last_error = ""
 
-        for client, fmt in attempts:
+        for client in clients:
 
-            # Remove files from previous attempt.
+            # Clean files from previous attempt.
             for old_file in tempdir.iterdir():
 
                 if old_file.is_file():
@@ -504,7 +492,12 @@ def download(
                     except Exception:
                         pass
 
-            r = run_ytdlp(
+            # ------------------------------------------------
+            # ATTEMPT 1
+            # Let yt-dlp choose the best available format.
+            # ------------------------------------------------
+
+            result = run_ytdlp(
                 [
                     "--no-playlist",
 
@@ -524,13 +517,10 @@ def download(
                     "1",
 
                     "-f",
-                    fmt,
-
-                    "--merge-output-format",
-                    "mp4",
+                    "best",
 
                     "-o",
-                    out_template,
+                    output_template,
 
                     video_url,
                 ],
@@ -538,46 +528,97 @@ def download(
             )
 
             files = [
-                p
-                for p in tempdir.iterdir()
-                if p.is_file()
+                file
+                for file in tempdir.iterdir()
+                if file.is_file()
             ]
 
             if (
-                r.returncode == 0
+                result.returncode == 0
                 and files
             ):
 
-                src = max(
+                source_file = max(
                     files,
-                    key=lambda p: p.stat().st_size
+                    key=lambda file:
+                    file.stat().st_size
                 )
 
-                safe_name = re.sub(
-                    r"[^A-Za-z0-9._-]+",
-                    "_",
-                    src.name
-                )
-
-                final = (
-                    DOWNLOAD_ROOT
-                    / safe_name
-                )
-
-                shutil.copy2(
-                    src,
-                    final
-                )
-
-                return FileResponse(
-                    path=final,
-                    media_type="video/mp4",
-                    filename=final.name
+                return save_download(
+                    source_file
                 )
 
             last_error = (
-                r.stderr
-                or r.stdout
+                result.stderr
+                or result.stdout
+                or "download failed"
+            )[-4000:]
+
+            # ------------------------------------------------
+            # ATTEMPT 2
+            # No forced format at all.
+            # ------------------------------------------------
+
+            for old_file in tempdir.iterdir():
+
+                if old_file.is_file():
+
+                    try:
+                        old_file.unlink()
+                    except Exception:
+                        pass
+
+            result = run_ytdlp(
+                [
+                    "--no-playlist",
+
+                    "--extractor-args",
+                    f"youtube:player_client={client}",
+
+                    "--retries",
+                    "3",
+
+                    "--fragment-retries",
+                    "3",
+
+                    "--file-access-retries",
+                    "3",
+
+                    "--retry-sleep",
+                    "1",
+
+                    "-o",
+                    output_template,
+
+                    video_url,
+                ],
+                timeout=900
+            )
+
+            files = [
+                file
+                for file in tempdir.iterdir()
+                if file.is_file()
+            ]
+
+            if (
+                result.returncode == 0
+                and files
+            ):
+
+                source_file = max(
+                    files,
+                    key=lambda file:
+                    file.stat().st_size
+                )
+
+                return save_download(
+                    source_file
+                )
+
+            last_error = (
+                result.stderr
+                or result.stdout
                 or "download failed"
             )[-4000:]
 
@@ -596,3 +637,49 @@ def download(
             tempdir,
             ignore_errors=True
         )
+
+
+# ============================================================
+# SAVE DOWNLOADED FILE
+# ============================================================
+
+def save_download(
+    source_file: Path
+):
+
+    extension = source_file.suffix.lower()
+
+    media_types = {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mkv": "video/x-matroska",
+        ".mov": "video/quicktime",
+        ".m4v": "video/mp4",
+    }
+
+    media_type = media_types.get(
+        extension,
+        "application/octet-stream"
+    )
+
+    safe_name = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        source_file.name
+    )
+
+    final_file = (
+        DOWNLOAD_ROOT
+        / safe_name
+    )
+
+    shutil.copy2(
+        source_file,
+        final_file
+    )
+
+    return FileResponse(
+        path=final_file,
+        media_type=media_type,
+        filename=final_file.name
+                )
