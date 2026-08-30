@@ -1064,4 +1064,534 @@ Google returned:
                 "code": code,
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
-                "redire
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=30,
+        )
+
+        if token_response.status_code != 200:
+
+            logger.error(
+                "Google token exchange failed: %s",
+                token_response.text,
+            )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Google authorization failed: "
+                    + token_response.text[:2000]
+                ),
+            )
+
+        token_data = token_response.json()
+
+        access_token = token_data.get(
+            "access_token"
+        )
+
+        if not access_token:
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Google did not return "
+                    "an access token."
+                ),
+            )
+
+        user_response = requests.get(
+            GOOGLE_USERINFO_URL,
+            headers={
+                "Authorization":
+                    f"Bearer {access_token}"
+            },
+            timeout=30,
+        )
+
+        user_data = {}
+
+        if user_response.status_code == 200:
+
+            user_data = user_response.json()
+
+        email = user_data.get(
+            "email",
+            "your Google account",
+        )
+
+        return simple_page(
+            "YouTube Authorization Successful",
+            f"""
+<div class="card">
+
+<h1>✓ YouTube connected</h1>
+
+<p>
+Your Google account
+<strong>{email}</strong>
+has been successfully authorized.
+</p>
+
+<p>
+Google successfully returned an OAuth access
+token for the permissions you approved.
+</p>
+
+<p>
+You can now close this page and return to
+the Shorts Auto Uploader app.
+</p>
+
+<div class="links">
+
+<a href="/youtube/account">
+    Return to YouTube Account
+</a>
+
+&nbsp; · &nbsp;
+
+<a href="/privacy">
+    Privacy Policy
+</a>
+
+</div>
+
+</div>
+""",
+        )
+
+    except HTTPException:
+
+        raise
+
+    except Exception as exc:
+
+        logger.exception(
+            "OAuth callback failed"
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "OAuth callback failed: "
+                + str(exc)
+            ),
+        )
+
+
+# ============================================================
+# ROOT
+# ============================================================
+
+@app.get("/")
+def root():
+
+    return {
+        "ok": True,
+        "service": "Shorts Archive Backend",
+        "version": "1.9.1",
+        "status": "running",
+        "cookies_configured": (
+            COOKIE_SOURCE.exists()
+        ),
+        "oauth_configured": oauth_configured(),
+        "routes": [
+            "/",
+            "/health",
+            "/privacy",
+            "/terms",
+            "/youtube/account",
+            "/oauth/start",
+            "/oauth/callback",
+        ],
+    }
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "ok": True,
+        "cookies_configured": (
+            COOKIE_SOURCE.exists()
+        ),
+        "oauth_configured": oauth_configured(),
+    }
+
+
+# ============================================================
+# DISCOVER SHORTS
+# ============================================================
+
+@app.post("/discover")
+def discover(
+    req: DiscoverRequest,
+):
+
+    original_url = validate_youtube_url(
+        req.channel_url
+    )
+
+    if not is_channel_url(
+        original_url
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Enter a public YouTube "
+                "channel URL"
+            ),
+        )
+
+    shorts_url = shorts_channel_url(
+        original_url
+    )
+
+    errors = []
+
+    logger.info(
+        "Starting Shorts discovery: %s",
+        shorts_url,
+    )
+
+    for client in DISCOVERY_CLIENTS:
+
+        try:
+
+            logger.info(
+                "Discovery client: %s",
+                client,
+            )
+
+            entries, stderr = (
+                discover_with_client(
+                    shorts_url,
+                    client,
+                )
+            )
+
+            if entries:
+
+                logger.info(
+                    "Discovery succeeded: "
+                    "%d videos via %s",
+                    len(entries),
+                    client,
+                )
+
+                return {
+                    "entries": entries,
+                    "count": len(entries),
+                    "client": client,
+                    "source": shorts_url,
+                }
+
+            if stderr:
+
+                errors.append(
+                    f"{client}: "
+                    f"{stderr[-2500:]}"
+                )
+
+        except HTTPException:
+
+            raise
+
+        except Exception as exc:
+
+            logger.exception(
+                "Discovery exception with %s",
+                client,
+            )
+
+            errors.append(
+                f"{client}: {exc}"
+            )
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            "YouTube Shorts discovery failed.\n\n"
+            + "\n\n".join(
+                errors
+            )[-10000:]
+        ),
+    )
+
+
+# ============================================================
+# DOWNLOAD SHORT
+# ============================================================
+
+@app.post("/download")
+def download(
+    req: DownloadRequest,
+):
+
+    video_url = (
+        "https://www.youtube.com/shorts/"
+        + req.video_id
+    )
+
+    tempdir = Path(
+        tempfile.mkdtemp(
+            prefix=(
+                f"short_{req.video_id}_"
+            ),
+            dir="/tmp",
+        )
+    )
+
+    output_template = str(
+        tempdir / "%(id)s.%(ext)s"
+    )
+
+    diagnostics = []
+
+    try:
+
+        logger.info(
+            "Starting download for %s",
+            req.video_id,
+        )
+
+        # ----------------------------------------------------
+        # TRY EACH YOUTUBE CLIENT
+        # ----------------------------------------------------
+
+        for client in DOWNLOAD_CLIENTS:
+
+            logger.info(
+                "Checking formats with client: %s",
+                client,
+            )
+
+            # ------------------------------------------------
+            # STEP 1:
+            # LIST FORMATS FOR THE EXACT SHORT
+            # ------------------------------------------------
+
+            try:
+
+                (
+                    format_code,
+                    format_output,
+                    format_error,
+                ) = get_available_formats(
+                    video_url,
+                    client,
+                )
+
+            except HTTPException:
+
+                raise
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Format inspection failed"
+                )
+
+                diagnostics.append(
+                    "\n"
+                    + ("=" * 60)
+                    + "\nCLIENT: "
+                    + client
+                    + "\nFORMAT CHECK EXCEPTION:\n"
+                    + str(exc)
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # FORMAT DISCOVERY FAILED
+            # ------------------------------------------------
+
+            if format_code != 0:
+
+                diagnostics.append(
+                    "\n"
+                    + ("=" * 60)
+                    + "\nCLIENT: "
+                    + client
+                    + "\nFORMAT DISCOVERY FAILED:\n"
+                    + (
+                        format_output
+                        + "\n"
+                        + format_error
+                    )[-7000:]
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # CHECK FOR REAL VIDEO/AUDIO
+            # ------------------------------------------------
+
+            if not has_real_media_formats(
+                format_output
+            ):
+
+                logger.warning(
+                    "[%s] No real media formats",
+                    client,
+                )
+
+                diagnostics.append(
+                    "\n"
+                    + ("=" * 60)
+                    + "\nCLIENT: "
+                    + client
+                    + "\nNO REAL MEDIA FORMATS FOUND.\n"
+                    + format_output[-7000:]
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # STEP 2:
+            # DOWNLOAD
+            # ------------------------------------------------
+
+            selectors = [
+                "bv*+ba/b",
+                "best",
+            ]
+
+            for selector in selectors:
+
+                clean_tempdir(
+                    tempdir
+                )
+
+                logger.info(
+                    "Downloading %s with %s / %s",
+                    req.video_id,
+                    client,
+                    selector,
+                )
+
+                result = run_ytdlp(
+                    [
+                        "--no-playlist",
+
+                        "--extractor-args",
+                        (
+                            "youtube:"
+                            f"player_client={client}"
+                        ),
+
+                        "--retries",
+                        "2",
+
+                        "--fragment-retries",
+                        "2",
+
+                        "--file-access-retries",
+                        "2",
+
+                        "--retry-sleep",
+                        "1",
+
+                        "--socket-timeout",
+                        "30",
+
+                        "-f",
+                        selector,
+
+                        "--merge-output-format",
+                        "mp4",
+
+                        "-o",
+                        output_template,
+
+                        video_url,
+                    ],
+                    timeout=300,
+                )
+
+                files = get_downloaded_files(
+                    tempdir
+                )
+
+                if (
+                    result.returncode == 0
+                    and files
+                ):
+
+                    source_file = max(
+                        files,
+                        key=lambda path:
+                        path.stat().st_size,
+                    )
+
+                    logger.info(
+                        "Download successful: %s "
+                        "(%d bytes)",
+                        req.video_id,
+                        source_file.stat().st_size,
+                    )
+
+                    return save_download(
+                        source_file
+                    )
+
+                stdout = (
+                    result.stdout or ""
+                )
+
+                stderr = (
+                    result.stderr or ""
+                )
+
+                diagnostics.append(
+                    "\n"
+                    + ("=" * 60)
+                    + "\nCLIENT: "
+                    + client
+                    + "\nFORMAT SELECTOR: "
+                    + selector
+                    + "\nAVAILABLE FORMATS:\n"
+                    + format_output[-5000:]
+                    + "\nDOWNLOAD STDOUT:\n"
+                    + stdout[-2500:]
+                    + "\nDOWNLOAD STDERR:\n"
+                    + stderr[-5000:]
+                )
+
+        # ----------------------------------------------------
+        # ALL CLIENTS FAILED
+        # ----------------------------------------------------
+
+        diagnostic_text = "\n".join(
+            diagnostics
+        )[-30000:]
+
+        logger.error(
+            "Download failed for %s",
+            req.video_id,
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "YouTube download failed.\n\n"
+                "Diagnostic information for "
+                "the exact Short:\n\n"
+                + diagnostic_text
+            ),
+        )
+
+    finally:
+
+        shutil.rmtree(
+            tempdir,
+            ignore_errors=True,
+        )
