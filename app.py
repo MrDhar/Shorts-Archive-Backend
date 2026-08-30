@@ -509,6 +509,9 @@ def download(
 
     try:
 
+        # Order clients: most reliable first
+        # mweb is generally most reliable for shorts
+        # web_embedded is most restrictive and should be last
         clients = [
             "mweb",
             "android_vr",
@@ -579,6 +582,11 @@ def download(
                     except Exception:
                         pass
 
+            # Use better format selection with fallbacks.
+            # Prioritize mp4 since it's most compatible,
+            # then fall back to webm, then any best format.
+            format_string = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best"
+
             download_result = run_ytdlp(
                 [
                     "--no-playlist",
@@ -598,10 +606,13 @@ def download(
                     "--retry-sleep",
                     "1",
 
-                    # Do not force format 18.
-                    # Use the best format available.
+                    # Better format selection with fallbacks:
+                    # 1. Best video (mp4) + best audio (m4a) 
+                    # 2. Best mp4 single file
+                    # 3. Best video + audio (any format)
+                    # 4. Best overall
                     "-f",
-                    "best",
+                    format_string,
 
                     "--merge-output-format",
                     "mp4",
@@ -663,4 +674,4 @@ def download(
         shutil.rmtree(
             tempdir,
             ignore_errors=True
-            )
+        )
