@@ -6,26 +6,11 @@ import subprocess
 import tempfile
 import secrets
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urlencode
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
-
-# ============================================================
-# OPTIONAL GOOGLE / YOUTUBE IMPORTS
-# ============================================================
-
-try:
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import Flow
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-except ImportError:
-    Credentials = None
-    Flow = None
-    build = None
-    MediaFileUpload = None
 
 
 # ============================================================
@@ -46,7 +31,7 @@ logger = logging.getLogger("shorts-archive")
 
 app = FastAPI(
     title="Shorts Archive Backend",
-    version="2.0.0",
+    version="1.9.0",
 )
 
 
@@ -87,39 +72,45 @@ COOKIE_FILE = Path(
 
 
 # ============================================================
-# GOOGLE / YOUTUBE CONFIG
+# GOOGLE OAUTH CONFIG
 # ============================================================
 
 GOOGLE_CLIENT_ID = os.getenv(
     "GOOGLE_CLIENT_ID",
-    "",
+    ""
 )
 
 GOOGLE_CLIENT_SECRET = os.getenv(
     "GOOGLE_CLIENT_SECRET",
-    "",
+    ""
 )
 
 GOOGLE_REDIRECT_URI = os.getenv(
     "GOOGLE_REDIRECT_URI",
-    "https://shorts-archive-backend.onrender.com/oauth2callback",
+    ""
 )
 
-GOOGLE_TOKEN_FILE = Path(
-    os.getenv(
-        "GOOGLE_TOKEN_FILE",
-        "/data/google_token.json",
-    )
+GOOGLE_OAUTH_SCOPE = (
+    "https://www.googleapis.com/auth/youtube.upload "
+    "https://www.googleapis.com/auth/youtube.readonly"
 )
 
-YOUTUBE_SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.readonly",
-]
+GOOGLE_AUTH_URL = (
+    "https://accounts.google.com/o/oauth2/v2/auth"
+)
 
-# OAuth state is kept temporarily in memory.
-# This is sufficient while the service is running.
-OAUTH_STATES = set()
+GOOGLE_TOKEN_URL = (
+    "https://oauth2.googleapis.com/token"
+)
+
+GOOGLE_USERINFO_URL = (
+    "https://www.googleapis.com/oauth2/v3/userinfo"
+)
+
+
+# Temporary OAuth state storage.
+# For a single-instance Render deployment this is sufficient.
+oauth_states = set()
 
 
 # ============================================================
@@ -156,54 +147,6 @@ class DiscoverRequest(BaseModel):
 class DownloadRequest(BaseModel):
     video_id: str = Field(
         pattern=r"^[A-Za-z0-9_-]{11}$",
-    )
-
-
-class UploadRequest(BaseModel):
-    video_id: str = Field(
-        pattern=r"^[A-Za-z0-9_-]{11}$",
-    )
-
-    title: str = Field(
-        default="",
-        max_length=100,
-    )
-
-    description: str = Field(
-        default="",
-        max_length=5000,
-    )
-
-    tags: list[str] = Field(
-        default_factory=list,
-    )
-
-    privacy_status: str = Field(
-        default="private",
-    )
-
-
-class ArchiveUploadRequest(BaseModel):
-    video_id: str = Field(
-        pattern=r"^[A-Za-z0-9_-]{11}$",
-    )
-
-    title: str = Field(
-        default="",
-        max_length=100,
-    )
-
-    description: str = Field(
-        default="",
-        max_length=5000,
-    )
-
-    tags: list[str] = Field(
-        default_factory=list,
-    )
-
-    privacy_status: str = Field(
-        default="private",
     )
 
 
@@ -653,331 +596,371 @@ def save_download(
 
 
 # ============================================================
-# INTERNAL DOWNLOAD TO TEMP FILE
-#
-# IMPORTANT:
-# This is separate from /download.
-# Your existing /download endpoint remains untouched.
+# BASIC WEB PAGES
 # ============================================================
 
-def download_to_temp_file(
-    video_id: str,
-) -> Path:
+def simple_page(
+    title: str,
+    content: str,
+) -> HTMLResponse:
 
-    video_url = (
-        "https://www.youtube.com/shorts/"
-        + video_id
-    )
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport"
+              content="width=device-width,initial-scale=1">
+        <title>{title}</title>
+        <style>
+            body {{
+                margin: 0;
+                padding: 40px 20px;
+                background: #0b0b0f;
+                color: #f5f5f5;
+                font-family: Arial, sans-serif;
+                line-height: 1.7;
+            }}
 
-    tempdir = Path(
-        tempfile.mkdtemp(
-            prefix=(
-                f"archive_upload_{video_id}_"
-            ),
-            dir="/tmp",
-        )
-    )
+            main {{
+                max-width: 760px;
+                margin: auto;
+            }}
 
-    output_template = str(
-        tempdir / "%(id)s.%(ext)s"
-    )
+            h1 {{
+                font-size: 32px;
+            }}
 
-    diagnostics = []
+            h2 {{
+                margin-top: 32px;
+            }}
 
-    try:
+            a {{
+                color: #8ab4f8;
+            }}
+        </style>
+    </head>
 
-        logger.info(
-            "Starting temporary download for upload: %s",
-            video_id,
-        )
+    <body>
+        <main>
+            {content}
+        </main>
+    </body>
+    </html>
+    """
 
-        for client in DOWNLOAD_CLIENTS:
-
-            logger.info(
-                "Checking formats with client: %s",
-                client,
-            )
-
-            try:
-
-                (
-                    format_code,
-                    format_output,
-                    format_error,
-                ) = get_available_formats(
-                    video_url,
-                    client,
-                )
-
-            except HTTPException:
-
-                raise
-
-            except Exception as exc:
-
-                logger.exception(
-                    "Format inspection failed"
-                )
-
-                diagnostics.append(
-                    "\n"
-                    + ("=" * 60)
-                    + "\nCLIENT: "
-                    + client
-                    + "\nFORMAT CHECK EXCEPTION:\n"
-                    + str(exc)
-                )
-
-                continue
-
-            if format_code != 0:
-
-                diagnostics.append(
-                    "\n"
-                    + ("=" * 60)
-                    + "\nCLIENT: "
-                    + client
-                    + "\nFORMAT DISCOVERY FAILED:\n"
-                    + (
-                        format_output
-                        + "\n"
-                        + format_error
-                    )[-7000:]
-                )
-
-                continue
-
-            if not has_real_media_formats(
-                format_output
-            ):
-
-                logger.warning(
-                    "[%s] No real media formats",
-                    client,
-                )
-
-                diagnostics.append(
-                    "\n"
-                    + ("=" * 60)
-                    + "\nCLIENT: "
-                    + client
-                    + "\nNO REAL MEDIA FORMATS FOUND.\n"
-                    + format_output[-7000:]
-                )
-
-                continue
-
-            selectors = [
-                "bv*+ba/b",
-                "best",
-            ]
-
-            for selector in selectors:
-
-                clean_tempdir(
-                    tempdir
-                )
-
-                logger.info(
-                    "Temporary downloading %s with %s / %s",
-                    video_id,
-                    client,
-                    selector,
-                )
-
-                result = run_ytdlp(
-                    [
-                        "--no-playlist",
-
-                        "--extractor-args",
-                        (
-                            "youtube:"
-                            f"player_client={client}"
-                        ),
-
-                        "--retries",
-                        "2",
-
-                        "--fragment-retries",
-                        "2",
-
-                        "--file-access-retries",
-                        "2",
-
-                        "--retry-sleep",
-                        "1",
-
-                        "--socket-timeout",
-                        "30",
-
-                        "-f",
-                        selector,
-
-                        "--merge-output-format",
-                        "mp4",
-
-                        "-o",
-                        output_template,
-
-                        video_url,
-                    ],
-                    timeout=300,
-                )
-
-                files = get_downloaded_files(
-                    tempdir
-                )
-
-                if (
-                    result.returncode == 0
-                    and files
-                ):
-
-                    source_file = max(
-                        files,
-                        key=lambda path:
-                        path.stat().st_size,
-                    )
-
-                    logger.info(
-                        "Temporary download successful: %s "
-                        "(%d bytes)",
-                        video_id,
-                        source_file.stat().st_size,
-                    )
-
-                    return source_file
-
-                stdout = (
-                    result.stdout or ""
-                )
-
-                stderr = (
-                    result.stderr or ""
-                )
-
-                diagnostics.append(
-                    "\n"
-                    + ("=" * 60)
-                    + "\nCLIENT: "
-                    + client
-                    + "\nFORMAT SELECTOR: "
-                    + selector
-                    + "\nAVAILABLE FORMATS:\n"
-                    + format_output[-5000:]
-                    + "\nDOWNLOAD STDOUT:\n"
-                    + stdout[-2500:]
-                    + "\nDOWNLOAD STDERR:\n"
-                    + stderr[-5000:]
-                )
-
-        diagnostic_text = "\n".join(
-            diagnostics
-        )[-30000:]
-
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Temporary YouTube download failed.\n\n"
-                + diagnostic_text
-            ),
-        )
-
-    except Exception:
-
-        shutil.rmtree(
-            tempdir,
-            ignore_errors=True,
-        )
-
-        raise
+    return HTMLResponse(content=html)
 
 
 # ============================================================
-# GOOGLE OAUTH HELPERS
+# PRIVACY POLICY
 # ============================================================
 
-def google_configured() -> bool:
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy():
+
+    return simple_page(
+        "Privacy Policy - Shorts Auto Uploader",
+        """
+        <h1>Privacy Policy</h1>
+
+        <p>
+            Shorts Auto Uploader is an application that helps users
+            manage and upload YouTube Shorts.
+        </p>
+
+        <h2>YouTube Account Access</h2>
+
+        <p>
+            If you choose to connect your YouTube account,
+            the application uses Google's OAuth authorization
+            system to request the permissions required for
+            YouTube functionality.
+        </p>
+
+        <h2>Information We Access</h2>
+
+        <p>
+            Depending on the features you use, the application
+            may receive basic YouTube account information and
+            permissions necessary to upload videos to your
+            YouTube channel.
+        </p>
+
+        <h2>Data Storage</h2>
+
+        <p>
+            We do not sell your personal information.
+            OAuth credentials are used only to provide the
+            requested YouTube functionality.
+        </p>
+
+        <h2>Third Parties</h2>
+
+        <p>
+            YouTube and Google APIs are operated by Google and
+            are subject to Google's own privacy policies and
+            terms.
+        </p>
+
+        <h2>Contact</h2>
+
+        <p>
+            For privacy questions, contact the developer through
+            the email address associated with this application.
+        </p>
+        """,
+    )
+
+
+# ============================================================
+# TERMS
+# ============================================================
+
+@app.get("/terms", response_class=HTMLResponse)
+def terms():
+
+    return simple_page(
+        "Terms of Service - Shorts Auto Uploader",
+        """
+        <h1>Terms of Service</h1>
+
+        <p>
+            By using Shorts Auto Uploader, you agree to use the
+            application only for lawful purposes and in accordance
+            with YouTube's applicable terms and policies.
+        </p>
+
+        <h2>YouTube Content</h2>
+
+        <p>
+            You are responsible for having the necessary rights
+            and permissions for any content that you upload or
+            process through the application.
+        </p>
+
+        <h2>Account Authorization</h2>
+
+        <p>
+            You may disconnect your Google or YouTube account
+            at any time through your Google account permissions.
+        </p>
+
+        <h2>Availability</h2>
+
+        <p>
+            We do not guarantee that the application or YouTube
+            services will always be available.
+        </p>
+
+        <h2>Contact</h2>
+
+        <p>
+            For questions regarding these terms, contact the
+            developer through the email address associated with
+            the application.
+        </p>
+        """,
+    )
+
+
+# ============================================================
+# OAUTH CONFIG CHECK
+# ============================================================
+
+def oauth_configured() -> bool:
 
     return bool(
         GOOGLE_CLIENT_ID
         and GOOGLE_CLIENT_SECRET
-        and Flow
+        and GOOGLE_REDIRECT_URI
     )
 
 
-def make_google_client_config():
+# ============================================================
+# START YOUTUBE OAUTH
+# ============================================================
 
-    return {
-        "web": {
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [
-                GOOGLE_REDIRECT_URI,
-            ],
-        }
-    }
+@app.get("/oauth/start")
+def oauth_start():
 
-
-def save_google_credentials(
-    credentials,
-):
-
-    GOOGLE_TOKEN_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    with open(
-        GOOGLE_TOKEN_FILE,
-        "w",
-        encoding="utf-8",
-    ) as token_file:
-
-        token_file.write(
-            credentials.to_json()
-        )
-
-    logger.info(
-        "Google OAuth credentials saved to %s",
-        GOOGLE_TOKEN_FILE,
-    )
-
-
-def load_google_credentials():
-
-    if not GOOGLE_TOKEN_FILE.exists():
-
-        return None
-
-    try:
-
-        credentials = Credentials.from_authorized_user_file(
-            str(GOOGLE_TOKEN_FILE),
-            YOUTUBE_SCOPES,
-        )
-
-        return credentials
-
-    except Exception as exc:
-
-        logger.warning(
-            "Could not load Google token: %s",
-            exc,
-        )
-
-        return None
-
-
-def youtube_service():
-
-    if not google_configured():
+    if not oauth_configured():
 
         raise HTTPException(
             status_code=500,
             detail=(
                 "Google OAuth is not configured. "
-                "Set GOOGLE_CLIENT_ID and "
-                "GOOGLE_CLIENT_SEC
+                "Set GOOGLE_CLIENT_ID, "
+                "GOOGLE_CLIENT_SECRET and "
+                "GOOGLE_REDIRECT_URI in Render."
+            ),
+        )
+
+    state = secrets.token_urlsafe(32)
+
+    oauth_states.add(state)
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": GOOGLE_OAUTH_SCOPE,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+    }
+
+    authorization_url = (
+        GOOGLE_AUTH_URL
+        + "?"
+        + urlencode(params)
+    )
+
+    return RedirectResponse(
+        authorization_url,
+        status_code=302,
+    )
+
+
+# ============================================================
+# OAUTH CALLBACK
+# ============================================================
+
+@app.get("/oauth/callback", response_class=HTMLResponse)
+async def oauth_callback(
+    request: Request,
+):
+
+    if not oauth_configured():
+
+        raise HTTPException(
+            status_code=500,
+            detail="Google OAuth is not configured.",
+        )
+
+    code = request.query_params.get(
+        "code"
+    )
+
+    state = request.query_params.get(
+        "state"
+    )
+
+    error = request.query_params.get(
+        "error"
+    )
+
+    if error:
+
+        return simple_page(
+            "YouTube Authorization",
+            f"""
+            <h1>Authorization cancelled</h1>
+            <p>Google returned:</p>
+            <p>{error}</p>
+            <p>
+                <a href="/youtube/account">
+                    Return to YouTube
+                </a>
+            </p>
+            """,
+        )
+
+    if not code:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Missing OAuth authorization code.",
+        )
+
+    if not state or state not in oauth_states:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired OAuth state.",
+        )
+
+    oauth_states.discard(state)
+
+    try:
+
+        import requests
+
+        response = requests.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+
+            logger.error(
+                "Google token exchange failed: %s",
+                response.text,
+            )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Google authorization failed: "
+                    + response.text[:2000]
+                ),
+            )
+
+        token_data = response.json()
+
+        access_token = token_data.get(
+            "access_token"
+        )
+
+        if not access_token:
+
+            raise HTTPException(
+                status_code=502,
+                detail="Google did not return an access token.",
+            )
+
+        user_response = requests.get(
+            GOOGLE_USERINFO_URL,
+            headers={
+                "Authorization":
+                    f"Bearer {access_token}"
+            },
+            timeout=30,
+        )
+
+        user_data = {}
+
+        if user_response.status_code == 200:
+
+            user_data = user_response.json()
+
+        email = user_data.get(
+            "email",
+            "your Google account",
+        )
+
+        return simple_page(
+            "YouTube Authorization Successful",
+            f"""
+            <h1>✓ YouTube connected</h1>
+
+            <p>
+                Your Google account
+                <strong>{email}</strong>
+                has been successfully authorized.
+            </p>
+
+            <p>
+                Shorts Auto Uploader can now request the
+                YouTube permissions you approved.
+            </p>
+
+            <p>
+                You can clo
