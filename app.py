@@ -531,59 +531,11 @@ def download(
 
         for client in clients:
 
-            # =================================================
-            # DIAGNOSTIC:
-            # Ask yt-dlp what formats it can actually see.
-            # =================================================
-
             logger.info(f"Attempting download for {req.video_id} with client: {client}")
 
-            format_result = run_ytdlp(
-                [
-                    "--no-playlist",
-
-                    "--extractor-args",
-                    f"youtube:player_client={client}",
-
-                    "--list-formats",
-
-                    video_url,
-                ],
-                timeout=180
-            )
-
-            format_output = (
-                format_result.stdout
-                or ""
-            )
-
-            format_error = (
-                format_result.stderr
-                or ""
-            )
-
-            # If yt-dlp cannot see formats with this client,
-            # move to the next client.
-
-            if (
-                format_result.returncode != 0
-                or "Available formats" not in format_output
-            ):
-
-                last_error = (
-                    f"Client: {client}\n"
-                    f"FORMAT ERROR:\n"
-                    f"{format_error or format_output}"
-                )[-5000:]
-
-                logger.warning(f"No formats found for {req.video_id} with {client}")
-
-                continue
-
-            # =================================================
-            # FORMATS EXIST.
-            # Now attempt the download.
-            # =================================================
+            # Skip the --list-formats check entirely.
+            # It often reports formats that don't actually download.
+            # Just go straight to trying the download.
 
             for old_file in tempdir.iterdir():
 
@@ -677,18 +629,20 @@ def download(
                     source_file
                 )
 
+            error_output = (
+                download_result.stderr
+                or download_result.stdout
+                or "Download failed (no output)"
+            )
+
             last_error = (
                 f"Client: {client}\n"
                 f"DOWNLOAD ERROR:\n"
-                + (
-                    download_result.stderr
-                    or download_result.stdout
-                    or "Download failed"
-                )
+                + error_output
             )[-5000:]
 
             logger.warning(
-                f"Download attempt failed for {req.video_id} with {client}"
+                f"Download attempt failed for {req.video_id} with {client}: {error_output[-200:]}"
             )
 
         # =====================================================
