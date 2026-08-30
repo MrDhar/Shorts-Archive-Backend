@@ -212,7 +212,6 @@ def run_ytdlp(
         (
             "youtubepot-bgutilhttp:"
             f"base_url={POT_URL};"
-            "disable_innertube=1"
         ),
     ]
 
