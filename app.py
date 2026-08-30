@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -38,8 +39,9 @@ DOWNLOAD_ROOT.mkdir(
     exist_ok=True
 )
 
+# Render-friendly: Limit discovery to avoid long spinup times
 MAX_DISCOVER = int(
-    os.getenv("MAX_DISCOVER", "5000")
+    os.getenv("MAX_DISCOVER", "500")
 )
 
 YTDLP = os.getenv(
@@ -434,11 +436,10 @@ def discover(
 
     errors = []
 
+    # Render-optimized: Only try 2 fastest clients for discovery
     clients = [
-        "android_vr",
-        "tv",
-        "web_embedded",
         "mweb",
+        "android_vr",
     ]
 
     for client in clients:
@@ -517,21 +518,29 @@ def download(
 
     try:
 
-        # Order clients: most reliable first
-        # mweb is generally most reliable for shorts
-        # web_embedded is most restrictive and should be last
+        # Render-optimized: Only try the 2 fastest, most reliable clients
+        # mweb is fastest for shorts, android_vr is reliable fallback
+        # Skip tv and web_embedded (slower, less compatible)
         clients = [
             "mweb",
             "android_vr",
-            "tv",
-            "web_embedded",
         ]
 
         last_error = ""
+        start_time = time.time()
 
-        for client in clients:
+        for client_index, client in enumerate(clients, 1):
 
-            logger.info(f"Attempting download for {req.video_id} with client: {client}")
+            # Fail fast if we're taking too long (avoid Render spindown)
+            elapsed = time.time() - start_time
+            if elapsed > 180:  # 3 minute total timeout
+                logger.warning(f"Total download attempt timeout ({elapsed:.0f}s elapsed), aborting")
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Download took too long ({elapsed:.0f}s). Likely a network issue."
+                )
+
+            logger.info(f"[Client {client_index}/2] Attempting {req.video_id} with {client}")
 
             # Skip the --list-formats check entirely.
             # It often reports formats that don't actually download.
@@ -546,61 +555,60 @@ def download(
                     except Exception:
                         pass
 
-            # Use client-specific format strings.
-            # Different clients support different formats, so try progressively simpler options.
+            # Aggressive timeout strategy for Render free tier
+            # Shorter timeouts per format, fail fast if not working
             format_attempts = [
-                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
-                "bestvideo+bestaudio/best",
-                "best",
+                # Most likely to work for YouTube Shorts
+                ("best", 120),  # (format_string, timeout_seconds)
+                # Fallback if single file doesn't work
+                ("bestvideo+bestaudio/best", 180),
             ]
 
             download_result = None
+            attempt_count = 0
 
-            for format_string in format_attempts:
+            for format_string, timeout_seconds in format_attempts:
 
+                attempt_count += 1
                 logger.info(
-                    f"Attempting {req.video_id} with {client} format: {format_string}"
+                    f"[{attempt_count}/2] {req.video_id} with {client} format: {format_string} (timeout: {timeout_seconds}s)"
                 )
 
                 download_result = run_ytdlp(
                     [
                         "--no-playlist",
+                        "--no-warnings",
 
                         "--extractor-args",
                         f"youtube:player_client={client}",
 
-                        "--retries",
-                        "3",
+                        # Aggressive retries for Render
+                        "--retries", "1",
+                        "--fragment-retries", "1",
+                        "--file-access-retries", "1",
+                        "--retry-sleep", "0",
 
-                        "--fragment-retries",
-                        "3",
+                        # Keep socket alive to prevent spindown issues
+                        "--socket-timeout", "30",
 
-                        "--file-access-retries",
-                        "3",
+                        "-f", format_string,
 
-                        "--retry-sleep",
-                        "1",
+                        "--merge-output-format", "mp4",
 
-                        "-f",
-                        format_string,
-
-                        "--merge-output-format",
-                        "mp4",
-
-                        "-o",
-                        output_template,
+                        "-o", output_template,
 
                         video_url,
                     ],
-                    timeout=900
+                    timeout=timeout_seconds
                 )
 
                 if download_result.returncode == 0:
-                    logger.info(f"✓ Format {format_string} succeeded")
+                    logger.info(f"✓ Format '{format_string}' succeeded for {req.video_id}")
                     break
                 else:
+                    error_msg = (download_result.stderr or download_result.stdout or "unknown")[-100:]
                     logger.warning(
-                        f"✗ Format {format_string} failed"
+                        f"✗ Format '{format_string}' failed: {error_msg}"
                     )
 
             files = [
@@ -669,4 +677,4 @@ def download(
         shutil.rmtree(
             tempdir,
             ignore_errors=True
-    )
+            )
