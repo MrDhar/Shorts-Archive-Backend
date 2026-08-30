@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import shutil
@@ -9,6 +10,13 @@ from urllib.parse import urlparse, urlunparse
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
+# Setup logging to capture errors in Render logs
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(
@@ -528,6 +536,8 @@ def download(
             # Ask yt-dlp what formats it can actually see.
             # =================================================
 
+            logger.info(f"Attempting download for {req.video_id} with client: {client}")
+
             format_result = run_ytdlp(
                 [
                     "--no-playlist",
@@ -565,6 +575,8 @@ def download(
                     f"FORMAT ERROR:\n"
                     f"{format_error or format_output}"
                 )[-5000:]
+
+                logger.warning(f"No formats found for {req.video_id} with {client}")
 
                 continue
 
@@ -642,6 +654,11 @@ def download(
                     file.stat().st_size
                 )
 
+                logger.info(
+                    f"Successfully downloaded {req.video_id} with {client} "
+                    f"({source_file.stat().st_size} bytes)"
+                )
+
                 return save_download(
                     source_file
                 )
@@ -656,17 +673,27 @@ def download(
                 )
             )[-5000:]
 
+            logger.warning(
+                f"Download attempt failed for {req.video_id} with {client}"
+            )
+
         # =====================================================
         # ALL CLIENTS FAILED
         # Return useful diagnostic information.
         # =====================================================
 
+        error_detail = (
+            "YouTube download failed.\n\n"
+            + last_error
+        )
+        
+        logger.error(
+            f"Download failed for video {req.video_id}: {last_error}"
+        )
+
         raise HTTPException(
             status_code=502,
-            detail=(
-                "YouTube download failed.\n\n"
-                + last_error
-            )
+            detail=error_detail
         )
 
     finally:
@@ -674,4 +701,4 @@ def download(
         shutil.rmtree(
             tempdir,
             ignore_errors=True
-        )
+                )
