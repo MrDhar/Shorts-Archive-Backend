@@ -112,9 +112,10 @@ GOOGLE_TOKEN_FILE = Path(
     )
 )
 
-YOUTUBE_UPLOAD_SCOPE = (
-    "https://www.googleapis.com/auth/youtube.upload"
-)
+YOUTUBE_SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+]
 
 # OAuth state is kept temporarily in memory.
 # This is sufficient while the service is running.
@@ -955,7 +956,7 @@ def load_google_credentials():
 
         credentials = Credentials.from_authorized_user_file(
             str(GOOGLE_TOKEN_FILE),
-            [YOUTUBE_UPLOAD_SCOPE],
+            YOUTUBE_SCOPES,
         )
 
         return credentials
@@ -979,8 +980,4 @@ def youtube_service():
             detail=(
                 "Google OAuth is not configured. "
                 "Set GOOGLE_CLIENT_ID and "
-                "GOOGLE_CLIENT_SECRET in Render."
-            ),
-        )
-
- 
+                "GOOGLE_CLIENT_SEC
