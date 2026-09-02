@@ -1,0 +1,23 @@
+name: Upload Queue Worker
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Trigger upload worker
+        env:
+          WORKER_SECRET: ${{ secrets.UPLOAD_WORKER_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --max-time 300 \
+            -X POST \
+            -H "X-Worker-Secret: ${WORKER_SECRET}" \
+            -H "Content-Length: 0" \
+            https://shorts-archive-backend.onrender.com/upload-queue/run
