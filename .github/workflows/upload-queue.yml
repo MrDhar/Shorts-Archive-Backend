@@ -2,7 +2,6 @@ name: Upload Queue Worker
 
 on:
   schedule:
-    # Run every 15 minutes, offset from the start of the hour
     - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
@@ -16,7 +15,7 @@ jobs:
         env:
           WORKER_SECRET: ${{ secrets.UPLOAD_WORKER_SECRET }}
         run: |
-          set -eu
+          set -u
 
           url="https://shorts-archive-backend.onrender.com/upload-queue/run"
 
@@ -26,42 +25,55 @@ jobs:
           while [ "$attempt" -le "$max_attempts" ]; do
             echo "Worker request attempt $attempt/$max_attempts"
 
+            set +e
             status="$(curl \
               --silent \
               --show-error \
               --output /tmp/worker-response.txt \
               --write-out '%{http_code}' \
-              --max-time 120 \
+              --connect-timeout 30 \
+              --max-time 300 \
               -X POST \
               -H "X-Worker-Secret: ${WORKER_SECRET}" \
               -H "Content-Length: 0" \
-              "$url" || true)"
+              "$url")"
+            curl_exit=$?
+            set -e
 
-            cat /tmp/worker-response.txt || true
+            if [ -f /tmp/worker-response.txt ]; then
+              cat /tmp/worker-response.txt
+            fi
+
             echo
+            echo "curl exit code: $curl_exit"
             echo "HTTP status: $status"
 
-            case "$status" in
-              2??)
-                echo "Worker completed successfully."
-                exit 0
-                ;;
+            if [ "$curl_exit" -eq 0 ]; then
+              case "$status" in
+                2??)
+                  echo "Worker completed successfully."
+                  exit 0
+                  ;;
 
-              502|503|504)
-                if [ "$attempt" -eq "$max_attempts" ]; then
-                  echo "Render did not become available after retries." >&2
+                502|503|504)
+                  echo "Temporary Render HTTP $status."
+                  ;;
+
+                *)
+                  echo "Worker returned non-retryable HTTP status: $status" >&2
                   exit 1
-                fi
+                  ;;
+              esac
+            else
+              echo "Transient curl/network failure (exit $curl_exit)."
+            fi
 
-                echo "Temporary Render/network error. Retrying in 15 seconds..."
-                sleep 15
-                ;;
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "Worker failed after all retries." >&2
+              exit 1
+            fi
 
-              *)
-                echo "Worker returned non-retryable HTTP status: $status" >&2
-                exit 1
-                ;;
-            esac
-
+            echo "Retrying in 15 seconds..."
+            sleep 15
             attempt=$((attempt + 1))
           done
